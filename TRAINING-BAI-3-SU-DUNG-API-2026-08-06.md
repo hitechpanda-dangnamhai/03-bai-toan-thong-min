@@ -128,6 +128,10 @@ curl -s localhost:16021/v1/ask -H "Authorization: Bearer $SKEY" -H "X-Project-Id
 `product.viewed` → search :16021 · `purchase.completed` → forecast :16023 · `stock.level` → decision :16022.
 
 ```bash
+# 0) sinh event_time = GIO UTC HIEN TAI (bug mui gio kinh dien: "Z" = UTC, VN = UTC+7 —
+#    ghi gio-dia-phuong + Z se thanh "tuong lai" va bi validator chan: future >5min = INVALID)
+EVT=$(date -u +%Y-%m-%dT%H:%M:%SZ) && echo "event_time=$EVT"
+
 # 1) khach XEM san pham (nuoi search/LTR/user_profile)
 curl -s localhost:16021/v1/events:ingest -H "Authorization: Bearer $SKEY" -H "X-Project-Id: demoshop" \
   -H "Content-Type: application/json" -d '{
@@ -135,7 +139,7 @@ curl -s localhost:16021/v1/events:ingest -H "Authorization: Bearer $SKEY" -H "X-
     "event_id": "hoc-ev-view-001",
     "schema_version": "1.0",
     "event_type": "product.viewed",
-    "event_time": "2026-08-06T09:05:00Z",
+    "event_time": "'$EVT'",
     "user_pseudo_id": "hoc-user-1",
     "session_id": null, "attribution_token": null,
     "payload": {"product_id": "hoc-sp-01"}
@@ -149,7 +153,7 @@ curl -s localhost:16023/v1/events:ingest -H "Authorization: Bearer $FKEY" -H "X-
     "event_id": "hoc-ev-buy-001",
     "schema_version": "1.0",
     "event_type": "purchase.completed",
-    "event_time": "2026-08-06T09:10:00Z",
+    "event_time": "'$EVT'",
     "user_pseudo_id": "hoc-user-1",
     "session_id": null, "attribution_token": null,
     "payload": {"order_ref": "hoc-order-001", "items": [{"product_id": "hoc-sp-01", "qty": 2, "unit_price": 250000}]}
