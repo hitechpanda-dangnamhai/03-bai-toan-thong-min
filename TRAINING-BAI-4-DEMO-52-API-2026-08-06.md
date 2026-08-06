@@ -15,8 +15,14 @@ FKEY=$(python3 -c "import json;print(json.load(open('data/seed_keys_demoshop.jso
 EVT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 echo "keys: ${SKEY:0:6}/${DKEY:0:6}/${FKEY:0:6} | EVT=$EVT"
 ```
-SKU mẫu dùng xuyên bài: `bh-mi-haohao` (62 ngày lịch sử — đủ điều kiện mọi API forecast) · sản phẩm tập:
-`hoc-sp-52` (tạo ở S5, xóa ở S17). Port: search 16021 · decision 16022 · forecast 16023.
+SKU mẫu dùng xuyên bài: `bh-mi-haohao` (128 ngày lịch sử sau SEED-120D 2026-08-06 — đủ điều kiện mọi API
+forecast, kể cả nấc LightGBM global) · sản phẩm tập: `hoc-sp-52` (tạo ở S5, xóa ở S17). Port: search 16021 ·
+decision 16022 · forecast 16023.
+> 🆕 **BẢN VÁ 2026-08-06 TỐI (chiến dịch T-PREP-DEMO-0807)** — 6 hành vi ĐÃ ĐỔI so với buổi sáng, mục nào
+> có nhãn 🆕 bên dưới thì kỳ vọng MỚI là chuẩn: F8 (:run trả 202+job_id, poll status) · D15 (BELOW_COST
+> giờ FAIL khi giá dưới vốn) · S16 (ngành hết phân biệt dấu) · S9 (answer tự lọc item lệch ngành) ·
+> S8 (PDP sản phẩm mới gợi ý cùng ngành thay vì popular) · preflight (`python -m seedtool check` tự từ
+> chối đo khi máy nghẹt, exit 3).
 
 ═══════════════════════════════════════════════
 # SERVICE 01 — SMARTSEARCH :16021 (17 endpoint)
@@ -69,14 +75,19 @@ curl -s "localhost:16021/v1/suggest?q=loa" -H "Authorization: Bearer $SKEY" -H "
 ```bash
 curl -s localhost:16021/v1/recommend -H "Authorization: Bearer $SKEY" -H "X-Project-Id: demoshop" -H "Content-Type: application/json" -d '{"context":"pdp","product_id":"dt-tainghe-baseus"}' | python3 -c "import json,sys; [print(i['product_id'],'|',i['title']) for i in json.load(sys.stdin).get('items',[])[:5]]"
 ```
-→ Món liên quan trang sản phẩm. Đổi `context`: `home`+`user_pseudo_id` · `similar` · `cart`. (SKU mới toanh
-sẽ lộ GAP cold-start — nợ W-RECO-PDP-COLDSTART.)
+→ Món liên quan trang sản phẩm. Đổi `context`: `home`+`user_pseudo_id` · `similar` · `cart`.
+🆕 SKU mới toanh (0 hành vi) giờ đi bậc thang cold-start: cùng-ngành theo nội dung → popular cùng-ngành →
+popular toàn shop (chỉ còn là lưới cuối). Thử lại ca đo sáng nay: upsert 1 SKU tai nghe mới rồi gọi pdp —
+kỳ vọng ≥3/5 item cùng ngành Điện tử (sáng nay: tất/kem chống nắng/sữa bột — đã hết). Nợ W-RECO-PDP-COLDSTART ĐÓNG.
 
 ### S9. POST /v1/ask — hỏi tự nhiên có guard chống bịa
 ```bash
 curl -s localhost:16021/v1/ask -H "Authorization: Bearer $SKEY" -H "X-Project-Id: demoshop" -H "Content-Type: application/json" -d '{"question":"co loa nao duoi 500 nghin khong?"}' | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['answer']); print('--- llm:', d['llm_used'], '| guard blocked:', d['grounding_guard']['blocked'])"
 ```
 → Câu trả lời grounded catalog. 4 chặng: parse luật (giá<500k) → RRF → template/LLM → guard B−A.
+🆕 Thêm trường `answer_coherence`: câu hỏi nêu ngành rõ ("tai nghe chống ồn") → item lệch ngành bị LOẠI
+khỏi answer (đo tối nay: tự loại chảo + ốp lưng, `dropped_ids` khai đủ); answer được phép <3 dòng; câu
+mơ hồ/đa-ngành → không lọc (giữ hành vi cũ). `items` retrieval vẫn trả đủ — chỉ ANSWER bị siết.
 
 ### S10. POST /v1/events:ingest [GHI] — bơm hành vi xem
 ```bash
@@ -120,7 +131,9 @@ forecast dùng chính API này cho cold-start analog).
 ```bash
 curl -s "localhost:16021/internal/products-by-category?project_id=demoshop&category_l1=Dien%20tu" -H "X-Internal-Token: dev-internal-token" | python3 -m json.tool | head -15
 ```
-→ Danh sách SKU ngành "Dien tu" — forecast:aggregate theo category dùng đường này.
+→ Danh sách SKU ngành — forecast:aggregate theo category dùng đường này.
+🆕 Hết phân biệt dấu/hoa-thường: `Dien tu` = `Điện tử` = `dIEN Tu` trả CÙNG tập (đo tối nay: 17=17=17 SKU,
+sáng nay "Dien tu" chỉ ra đúng hoc-sp-52 tự tập). Ngành-ma do khai không dấu đã hết đường sinh — W-CAT-L1-DIACRITICS ĐÓNG.
 
 ### S17. DELETE /v1/products/{id} [GHI] — xóa sản phẩm (dọn sân, chạy CUỐI bài)
 ```bash
@@ -213,6 +226,8 @@ curl -s -w "\nstatus: %{http_code}\n" localhost:16022/v1/decisions:price-preview
 ```
 → `200`: current vs candidate (units/profit 30d) + `delta_profit_30d` (âm = máy CAN đừng làm) + elasticity_used
 khai nguồn (n_points=0 → mượn pooled_prior). HOẶC `412` nêu đích danh cổng thiếu (sales/cost/price) — lỗi dẫn đường.
+🆕 Với chính lệnh trên (mì 9.000đ vs vốn ~70.458đ): `guardrails` giờ trả `{"code":"BELOW_COST","status":"FAIL"}`
+— sáng nay 2 nhánh đều PASS oan (bug D15 bạn tìm ra), đã fix + test hồi quy ghim đúng ca này. Giá trên vốn → PASS.
 
 ### D16. GET /v1/decisions:replenish-plan — kế hoạch nhập hàng
 ```bash
@@ -256,11 +271,18 @@ curl -s "localhost:16023/v1/events:dead?limit=5" -H "Authorization: Bearer $FKEY
 
 ### F8. POST /v1/forecast:run [GHI] — train + sinh projections
 ```bash
-curl -s -X POST localhost:16023/v1/forecast:run -H "Authorization: Bearer $FKEY" -H "X-Project-Id: demoshop" -H "Content-Type: application/json" -d '{}' | python3 -m json.tool | head -15
+curl -s -w "\nstatus: %{http_code}\n" -X POST localhost:16023/v1/forecast:run -H "Authorization: Bearer $FKEY" -H "X-Project-Id: demoshop" -H "Content-Type: application/json" -d '{}'
 ```
-→ Router phân loại từng SKU → thang model (cold_start_analog → similar_item_transfer → croston/SBA →
-seasonal_naive → ETS+Theta → LightGBM ≥120d). ⚠ Endpoint NẶNG NHẤT HỆ — cold-start có thể timeout oan
-(nợ W-RUN-ASYNC-202); phản xạ Bài 1: chờ worker rồi đo lại.
+🆕 → `202` NGAY LẬP TỨC: `{"status":"queued","run_id":"r_...","job_id":"fr-demoshop-r_..."}` — đo "nhận việc",
+worker làm nặng phía sau (nợ W-RUN-ASYNC-202 ĐÓNG, hết cảnh 4 lần timeout như Bài 1 sáng nay). Gọi lại khi
+job đang chạy = trả CÙNG job (idempotent, không nhân đôi việc). Theo dõi tới xong:
+```bash
+curl -s "localhost:16023/v1/projections/status?job_id=fr-demoshop-r_$(date -u +%F)" -H "Authorization: Bearer $FKEY" -H "X-Project-Id: demoshop" | python3 -m json.tool
+```
+→ `job.status`: `queued` → `running` → `done` (hoặc `failed` + `error_code` — lỗi nhìn thấy được, không nuốt).
+Máy nguội train từ 0 có thể vài phút — F9/F10/F11 chỉ đo SAU khi `done`. Router phân loại từng SKU → thang model
+(cold_start_analog → similar_item_transfer → croston/SBA → seasonal_naive → ETS+Theta → LightGBM ≥120d);
+sau SEED-120D kỳ vọng `model_used="lgbm_global"` xuất hiện ở ~66 SKU bán đều (soi qua F9).
 
 ### F9. POST /v1/forecast:query — hỏi dải dự báo
 ```bash
