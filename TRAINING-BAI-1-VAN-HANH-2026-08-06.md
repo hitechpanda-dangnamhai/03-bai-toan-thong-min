@@ -149,6 +149,16 @@ Kỳ vọng: **API CHECK 42/42 PASS — mọi lần.** FAIL tại đây = sự c
 
 **Vì sao cần 3a/3b (nợ thiết kế có tên):** `forecast:run` làm việc nặng ĐỒNG BỘ trong request → kết quả probe = cuộc đua (thời gian việc vs trần chờ), phụ thuộc 3 biến ẩn: độ ấm model · CPU rảnh · hàng đợi worker. Đã ghi nợ `W-RUN-ASYNC-202` (chuyển sang 202+job_id, đo "nhận việc" thay vì "làm xong việc") — land xong thì bài này rút còn 4 bước.
 
+> 🆕 **CẬP NHẬT TỐI 2026-08-06 — W-RUN-ASYNC-202 ĐÃ LAND:** `:run` giờ trả `202+job_id` ngay, probe đo
+> "nhận việc" tất định; cái "cuộc đua" ở trên chuyển hết về phía worker và theo dõi được bằng
+> `GET /v1/projections/status?job_id=...` (`queued→running→done/failed`). B3a/B3b vẫn giữ khi dựng lại
+> stack (train nguội vẫn tốn phút — chỉ là không còn rơi vào mặt client). Thêm 2 vũ khí mới:
+> 1. **Preflight máy:** `python -m seedtool check` tự TỪ CHỐI đo khi máy nghẹt — exit `3` in
+>    `MOI-TRUONG-BAN: load1=... nproc=...` (khác 0=PASS, 1=FAIL nghiệp vụ). Hết cảnh 39/42 oan như sáng nay.
+> 2. **GOTCHA backtest-on-boot (đo thật 17h):** restart container forecast ⇒ `start_backtest_loop` chạy
+>    FULL backtest mọi project ngay khi boot (CPU 90%+ có thể vài chục phút) — **ĐỪNG restart forecast ngay
+>    trước demo**; lỡ restart thì chờ bằng B3b (đo CPU <20-50%), không chờ bằng đồng hồ.
+
 ---
 
 ## PHẦN D — CHẨN ĐOÁN: 3 LOẠI TIMEOUT (case study thật 2026-08-06)
