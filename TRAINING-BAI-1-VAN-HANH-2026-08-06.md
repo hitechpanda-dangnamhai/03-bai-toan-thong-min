@@ -133,11 +133,15 @@ make check-apis PROJECT=demoshop ; echo "== WARM-UP XONG (khong cham diem) =="
 ```
 Sau `down/up`, lần gọi `:run` đầu bắt buộc train model từ 0 → có thể FAIL timeout — **là kỳ vọng, kệ nó**.
 
-### B3b — Cổng chờ worker nghỉ (bước biến hên-xui thành tất định)
+### B3b — Cổng chờ CẢ HAI container forecast nghỉ (bước biến hên-xui thành tất định)
 ```bash
-until [ "$(docker stats --no-stream --format '{{.CPUPerc}}' miniai-forecast-worker | cut -d. -f1)" -lt 50 ]; do echo "worker dang train... cho 15s"; sleep 15; done; echo "== WORKER NGHI — duoc phep do =="
+until FC=$(docker stats --no-stream --format '{{.CPUPerc}}' miniai-forecast | cut -d. -f1); FW=$(docker stats --no-stream --format '{{.CPUPerc}}' miniai-forecast-worker | cut -d. -f1); [ "${FC:-99}" -lt 50 ] && [ "${FW:-99}" -lt 50 ]; do echo "forecast dang cay (svc=${FC}% wk=${FW}%)... cho 15s"; sleep 15; done; echo "== FORECAST NGHI — duoc phep do =="
 ```
-Đo trực tiếp CPU worker thay vì `sleep` đoán mò — cổng chỉ mở khi train xong thật.
+Đo trực tiếp CPU thay vì `sleep` đoán mò — cổng chỉ mở khi máy xong việc thật.
+🛠 **Sửa 06/08 tối (bản cũ SAI):** bản đầu chỉ canh `miniai-forecast-worker` — nhưng **backtest-on-boot chạy
+trong container SERVICE `miniai-forecast`** (vòng lặp nằm ở startup của API, main.py). Canh mỗi worker thì
+cổng mở oan giữa lúc service đang cày full backtest sau `docker compose up` từ máy nguội → đo ra FAIL oan.
+Quy tắc nhớ: **cứ thấy container `miniai-forecast` BOOT là backtest chạy** — up trên stack đang chạy thì không.
 
 ### B3c — PHÁN QUYẾT
 ```bash
