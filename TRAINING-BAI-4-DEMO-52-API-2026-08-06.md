@@ -156,11 +156,14 @@ curl -s "localhost:16022/v1/config:supplier" -H "Authorization: Bearer $DKEY" -H
 ```
 → lead-time, MOQ theo supplier — nguyên liệu cho replenish-plan.
 
-### D8. PUT /v1/config:supplier [GHI] — khai/sửa supplier
+### D8. PUT /v1/config:supplier [GHI] — khai điều kiện cung ứng THEO SẢN PHẨM
 ```bash
-curl -s -X PUT "localhost:16022/v1/config:supplier" -H "Authorization: Bearer $DKEY" -H "X-Project-Id: demoshop" -H "Content-Type: application/json" -d '{"supplier_ref":"ncc-b4-demo","lead_time_days":3,"moq":10}' | python3 -m json.tool
+curl -s -X PUT "localhost:16022/v1/config:supplier" -H "Authorization: Bearer $DKEY" -H "X-Project-Id: demoshop" -H "Content-Type: application/json" -d '{"product_id":"bh-mi-haohao","lead_time_days":3,"moq":10}' | python3 -m json.tool
 ```
-→ 200 — supplier mới có lead-time 3 ngày, đặt tối thiểu 10.
+→ 200. ⚠ Khóa là **`product_id`** (không phải supplier_ref!) — nhìn D7: mỗi dòng config = 1 sản phẩm với
+lead_time_days/lead_time_std/moq/pack_size. Bản đầu sổ tay viết sai `supplier_ref` → API dẫn đường bằng 400
+"'product_id' must be a non-empty string" (đã sửa 2026-08-06). Ý nghĩa: "món này đặt nhà cung cấp thì 3 ngày
+mới về, mỗi lần đặt tối thiểu 10" — nguyên liệu trực tiếp cho replenish-plan (D16).
 
 ### D9. POST /v1/events:ingest [GHI] — nạp tồn kho (+ họ hàng: cost.recorded, price.changed)
 ```bash
