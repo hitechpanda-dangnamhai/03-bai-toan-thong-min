@@ -358,6 +358,36 @@ xác suất mà chủ shop hiểu được.
 3. Trung hòa đơn tập (nếu muốn số ròng sạch): bút toán đảo `order.returned` cho từng `b4-order-*` đã bơm
    (xem Bài 3 mục 3.10b).  4. Gate chốt: `make check-apis PROJECT=demoshop` → 42/42.
 
+═══════════════════════════════════════════════
+# 🆕 MÀN DEMO 2-LINE — SP MỚI vs SP ĐẦY ĐỦ DATA (human đề xuất tối 06/08, số đo thật kèm dưới)
+═══════════════════════════════════════════════
+> Ý tưởng bán hàng: chạy SONG SONG cùng 4 API trên 2 sản phẩm — khách thấy NGAY hệ trả lời được cả hàng
+> mới toanh (thang cold-start) lẫn hàng có 128 ngày lịch sử (trí khôn đầy đủ), và LUÔN KHAI THẬT nó đang
+> ở nấc nào. Line A = `dt-tainghe-baseus` (tai nghe, 128d). Line B = tạo sống 1 tai nghe mới trước mặt khách.
+
+**B-0. Tạo SP mới (chạy trước mặt khách):**
+```bash
+curl -s localhost:16021/v1/products:upsert -H "Authorization: Bearer $SKEY" -H "X-Project-Id: demoshop" -H "Content-Type: application/json" -d '{"products":[{"id":"demo-tn-moi","title":"Tai nghe chup tai X-Sound Pro 2026","description":"Tai nghe bluetooth chong on chu dong, pin 40h","categories":["Điện tử > Âm thanh"],"brands":["XSound"],"price_info":{"currency_code":"VND","price":350000},"availability":"IN_STOCK","available_quantity":20,"attributes":{},"images":[],"publish_time":"2026-08-06T18:00:00Z"}]}'
+```
+Chờ ~6-9s (outbox → Vespa) rồi chạy 4 cặp:
+
+| API | Line B — `demo-tn-moi` (0 hành vi) | Line A — `dt-tainghe-baseus` (128d) | Câu chuyện |
+|---|---|---|---|
+| S6 search "tai nghe chong on" | CÓ MẶT trong kết quả sau vài giây | top đầu (điểm hành vi tích lũy) | hàng mới lên kệ tức thì, thứ hạng phải NUÔI bằng hành vi |
+| S8 recommend pdp | 5/5 CÙNG NGÀNH điện tử (bậc thang cold-start — đo thật: cường lực/iPhone/sạc, `fallback:"popularity"` cùng-ngành) | phụ kiện mua-kèm thật (Sony/bàn phím/SSD — bought_together) | chưa có hành vi thì mượn ngành, có hành vi thì dùng hành vi |
+| F9 forecast:query | `404 NOT_FOUND` — chưa có đơn nào, MÁY KHÔNG BỊA SỐ | `200 model_used="lgbm_global"`, coverage 0.857 tự chấm | trung thực > ảo thuật; nạp vài đơn (F5) là leo thang cold_start→analog |
+| D15 price-preview 300k/180k | `412 no sales in last 30d` — lỗi DẪN ĐƯỜNG nói thiếu gì | `200` eps −0.57 `ols_daily n=113, conf 0.9` + guardrail | 3 cổng dữ liệu bảo vệ khách khỏi lời khuyên thiếu căn cứ |
+
+**Chốt màn:** mọi response đều tự khai nguồn (`model_used` · `method/n_points` · `fallback`) — "hệ không bao giờ
+giả vờ biết". **Dọn sân:** `curl -s -X DELETE localhost:16021/v1/products/demo-tn-moi -H "Authorization: Bearer $SKEY" -H "X-Project-Id: demoshop"` (204).
+
+# ⚠ VÙNG TRÁNH KHI DEMO (điểm yếu ĐO ĐƯỢC tối 06/08 — W-SEARCH-CONCEPT-NEGATION)
+Truy vấn KHÁI NIỆM + PHỦ ĐỊNH hiện thua: "đồ uống không cồn" → chuột KHÔNG dây, nồi chiên KHÔNG dầu (máy khớp
+chữ "không"); "nước giải khát" → nước GIẶT, nước rửa chén. `/v1/ask` cũng thua ca này. ĐỪNG gõ dạng này khi demo.
+Nếu khách tự thử → trả lời chuẩn bị sẵn: "đúng, truy vấn thuộc-tính-ẩn là hạng mục roadmap (concept-mapping +
+attribute enrichment — nền intent_lexicon/enrich_attrs có sẵn); hệ này mạnh ở truy vấn danh-từ-ngành + typo +
+không-dấu (S6 demo được ngay)". Điểm yếu nói trước mặt luôn ăn điểm hơn bị bắt quả tang.
+
 ## GHI NHỚ CHUNG
 - 2 header mọi API nghiệp vụ: `Authorization: Bearer <key-đúng-service>` + `X-Project-Id` · nội bộ dùng
   `X-Internal-Token`.
