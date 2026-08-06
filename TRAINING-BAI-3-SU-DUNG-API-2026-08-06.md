@@ -189,11 +189,23 @@ mới có thể rơi vào nhánh cold-start/fallback — chính là điều đá
 # 1) kich hoat sinh quyet dinh
 curl -s -X POST localhost:16022/v1/decisions:run -H "Authorization: Bearer $DKEY" -H "X-Project-Id: demoshop" \
   -H "Content-Type: application/json" -d '{}' | python3 -m json.tool
-# 2) doc danh sach quyet dinh dang mo
+# 2) doc danh sach quyet dinh (truong THAT: items[]; giai thich nam o "trace", tien o "expected_value")
 curl -s "localhost:16022/v1/decisions?page_size=5" -H "Authorization: Bearer $DKEY" -H "X-Project-Id: demoshop" \
-  | python3 -c "import json,sys; d=json.load(sys.stdin); [print(x.get('decision_id'),'|',x.get('kind'),'|',(x.get('explain') or x.get('title') or '')[:80]) for x in d.get('decisions', d.get('items', []))[:5]]"
+  | python3 -c "
+import json,sys
+for x in json.load(sys.stdin).get('items', [])[:5]:
+    ev = (x.get('expected_value') or {})
+    print(x.get('decision_id'), '|', x.get('kind'), '|', x.get('status'), '|', f\"EV {ev.get('amount',0):,.0f} {ev.get('currency_code','')}/{ev.get('per','')}\")"
+# 3) mo NGUYEN CON mot quyet dinh de doc du xuong thit (subject/action_params/guardrails/trace):
+curl -s "localhost:16022/v1/decisions?page_size=1" -H "Authorization: Bearer $DKEY" -H "X-Project-Id: demoshop" | python3 -m json.tool
 ```
-**Kỳ vọng:** run trả `{"created": N}` · list in tối đa 5 quyết định: id | kind | giải thích tiếng Việt.
+**Kỳ vọng:** run trả `{"created": N, "skipped_dedup": ..., "skipped_by_reason": {...}}` — N=0 với đủ bản khai lý do
+im lặng cũng là kết quả TỐT (dedup/anti-osc/plan-conflict/no-cost = 4 cửa kỷ luật). List in: id | kind | status | EV.
+**Giải phẫu 1 decision (đo thật 2026-08-06):** `subject` (cặp SKU) · `action_params` (bundle_price/voucher/margin)
+· `expected_value` (VD 177.464đ/tháng, basis profit_delta) · `confidence` · `guardrails` (VOUCHER_MARGIN_FLOOR PASS)
+· **`trace`** = lời giải thích CÓ SỐ: "lift=19.42 (>=2.0), pair_cnt=26 (>=5)... EV = 0.15*26*(11819+33684) = 177464"
+— mọi lời khuyên tự trình bằng chứng, audit được từng phép nhân. `status`: open = chờ chủ shop · accepted = đã nhận
+(probe check-apis tự accept decision đầu — muốn feedback ở 3.9 hãy chọn 1 con đang **open**).
 **Giải nghĩa:** 7 kind (below_cost, cost_increase, price_suggestion, replenishment, stockout_warning,
 slow_mover, promo_legal). Mỗi quyết định kèm giải thích tiếng Việt + EV — người bán không cần hiểu ML vẫn
 hành động được. `:run` chạy trên TOÀN BỘ data tenant (không riêng SKU của bạn). GHI LẠI 1 `decision_id` cho 3.9.
