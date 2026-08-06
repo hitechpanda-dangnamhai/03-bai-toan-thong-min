@@ -71,7 +71,7 @@ Engine = model-router tự chọn (naive / snaive / ETS / LightGBM) theo độ d
 | Nhóm | Endpoint | Input → Output |
 |---|---|---|
 | Nuôi data (A) | `POST /v1/events:ingest` · `:backfill` | đơn hàng ngày / lịch sử bán cũ → chuỗi thời gian per-SKU |
-| Chạy + hỏi (B) | `POST /v1/forecast:run` | (trigger) → train + sinh projections |
+| Chạy + hỏi (B) | `POST /v1/forecast:run` | (trigger) → 🆕 `202 {status:queued, job_id}` ngay, worker train + sinh projections; poll `GET /v1/projections/status?job_id=...` tới `done` (W-RUN-ASYNC-202, 2026-08-06) |
 | | `POST /v1/forecast:query` | SKU + horizon → dải P10/P50/P90 theo ngày + totals + model_used + data_window |
 | | `POST /v1/forecast:aggregate` | nhóm SKU/category → dự báo gộp |
 | | `GET /v1/forecast:accuracy` | → MASE / coverage so thực tế (hệ tự chấm điểm mình) |
