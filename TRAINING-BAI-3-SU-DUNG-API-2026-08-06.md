@@ -65,20 +65,37 @@ curl -s localhost:16021/v1/products:upsert -H "Authorization: Bearer $SKEY" -H "
 
 ## 3.2 — VAI B: TÌM THẤY CHÍNH NÓ (search) + bài học EVENTUAL CONSISTENCY
 
+**Bản THÍ NGHIỆM (khuyên dùng khi học — quan sát hàng đợi VÀ kết quả search cùng một khoảnh khắc):**
+```bash
+docker exec miniai-postgres psql -U miniai -d miniai_search -c "SELECT count(*) FROM catalog_outbox;" \
+&& curl -s localhost:16021/v1/search -H "Authorization: Bearer $SKEY" -H "X-Project-Id: demoshop" \
+  -H "Content-Type: application/json" -d '{"query":"tai nghe mecom"}' \
+  | python3 -c "import json,sys; d=json.load(sys.stdin); items=d.get('items',[]); print(f'tim thay {len(items)} ket qua:'); [print(' ', i.get('product_id'), '|', i.get('title')) for i in items[:5]]"
+```
+**Cách đọc — dù rơi vào nhánh nào cũng tự giải được:**
+- `count = 0` → worker đã đẩy xong hàng đợi → search PHẢI thấy `hoc-sp-01` trong danh sách.
+- `count > 0` → còn việc đang chờ → search chưa thấy sản phẩm thì KHÔNG phải lỗi — chờ 3-5 giây chạy lại cả
+  cụm, xem count tụt về 0 và sản phẩm hiện ra. (Chứng kiến cảnh "chưa thấy → thấy" còn quý hơn thấy ngay —
+  đó là eventual consistency bằng xương thịt.)
+
+**Bản QUY TRÌNH (khi tích hợp thật, chỉ cần search):**
 ```bash
 curl -s localhost:16021/v1/search -H "Authorization: Bearer $SKEY" -H "X-Project-Id: demoshop" \
   -H "Content-Type: application/json" -d '{"query":"tai nghe mecom"}' \
   | python3 -c "import json,sys; d=json.load(sys.stdin); [print(i.get('product_id'), '|', i.get('title')) for i in d.get('items',[])[:5]]"
 ```
-**Kỳ vọng:** dòng đầu (hoặc trong top) có `hoc-sp-01 | Tai nghe MECOM hoc bai chong on`.
-**Nếu CHƯA thấy — đó là bài học, không phải lỗi:** đường đi của sản phẩm là
-`upsert → bảng catalog (PG) → catalog_outbox → worker đẩy vào Vespa → search thấy`. Vài giây đầu Vespa chưa nhận
-= **eventual consistency** (nhất quán "rồi sẽ tới"). Phản xạ: chờ 3-5s chạy lại, hoặc soi hàng đợi:
-```bash
-docker exec miniai-postgres psql -U miniai -d miniai_search -c "SELECT count(*) FROM catalog_outbox;"
-```
-`0` = đã đẩy hết sang Vespa, search phải thấy. (Mẫu outbox này là chuẩn ngành — ghi DB + việc-cần-đẩy trong 1
-transaction, worker đẩy dần, không bao giờ "ghi DB xong mà quên đẩy index".)
+Search chưa thấy → mới quay lại soi outbox như trên (soi-queue là công cụ chẩn đoán, không phải bước bắt buộc).
+
+**Giải nghĩa kiến trúc:** đường đi của sản phẩm là
+`upsert → bảng catalog (PG) → catalog_outbox → worker đẩy vào Vespa → search thấy`. Mẫu **outbox** là chuẩn
+ngành: ghi sản phẩm + ghi việc-cần-đẩy trong CÙNG 1 transaction PG (không bao giờ "ghi DB xong mà quên đẩy
+index"); Vespa chết thì việc nằm chờ, sống lại đẩy tiếp — không mất, chỉ muộn. Chính vì thế response 3.1 có
+`queued_for_index: 1` — API tự khai 2 thì: đã-ghi-sổ (upserted) và sẽ-đánh-chỉ-mục (queued).
+
+**Bài học xếp hạng (kết quả thật 2026-08-06):** `hoc-sp-01` đứng **#2**, thua `Sony WH-CH520` dù query có chữ
+"mecom" — KHÔNG phải lỗi. Ranking lai = khớp chữ (BM25) + khớp nghĩa (vector) + **tín hiệu hành vi**
+(click/mua lịch sử). Sony là hàng seed có lịch sử click thật; sản phẩm mới toanh tín hiệu hành vi = 0. Hệ nói:
+"khớp query thì có, nhưng chưa ai chứng thực". Muốn lên hạng → cần vai C (bơm event 3.5), không phải sửa title.
 
 ## 3.3 — VAI B: AUTOCOMPLETE + GỢI Ý NGỮ CẢNH
 
