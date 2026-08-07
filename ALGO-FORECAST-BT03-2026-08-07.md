@@ -469,8 +469,8 @@ Bệnh này nặng hơn vẻ ngoài: theo skill `SK-FC-SWALLOWED-CANDIDATE` tron
 **nhánh intermittent chỉ còn `seasonal_naive` suốt từ M5 đến M15** — nhiều milestone "đạt gate" trong khi
 model chuyên trị hàng bán lai rai chưa từng chạy. Luật rút ra (nguyên văn):
 *"sau khi thêm candidate PHẢI đo `metrics.keys() == candidates` trên series thật — càng nuốt exception
-càng dễ candidate chết âm thầm."* Hôm nay `backtest.py:131-133` **vẫn còn** `try/except ... continue` đó
-(`:134` `except Exception: continue`) và **vẫn không có phép đo nào so `metrics.keys()` với rổ ứng viên**.
+càng dễ candidate chết âm thầm."* Hôm nay `backtest.py:131-135` **vẫn còn nguyên** cái `try: ... except Exception: continue` đó,
+và **vẫn không có phép đo nào so `metrics.keys()` với rổ ứng viên** — bệnh chưa được rào lại bằng máy.
 
 **Khi được chọn:** `router.py:26-36` (segment `intermittent_croston` → `croston`, `intermittent_sba` → `sba`);
 tên model trong backtest là `"croston_auto"` và **tự chọn SBA theo CV²** ngay tại chỗ:
@@ -1738,3 +1738,221 @@ Nên chuẩn hoá về một trong hai, không để hai triết lý cùng tồn
   đã chuyển sang per-project (`forecast_run.py:1115`) sau khi đo được 59 s xếp hàng — cùng một bệnh, chỉ mới chữa một nửa.
 - `run_backtest_once` gọi `list_products_with_demand(pool)` **không truyền `project_id`** rồi lọc bằng Python
   (`backtest_run.py:100-102`) — đúng cái pattern mà `store/forecasts.py:44-56` đã ghi là W-TENANT-SCOPE-FC và đã sửa cho forecast.
+
+---
+
+## 14. "VÌ SAO" — TRI THỨC NỀN TỪ DB `rail` (không có trong code)
+
+> Nguồn: `index.db` của mecom (`kb_adr`, `kb_feature`, `kb_contract`, `kb_domain`, `facts`, `tasks`, `skills`, `events`).
+> Phần này **KHÔNG bịa thêm thuật toán** — chỉ ghi lý do thiết kế và trạng thái nghiệm thu mà code không nói.
+
+### 14.1. Bất biến cấp domain (`kb_domain forecast.invariants`)
+
+Nguyên văn, và mỗi gạch đầu dòng đều đã được đối chiếu với code ở §12:
+
+> `P10≤P50≤P90 enforce sau mọi bước, kể cả sau calibration (quantile-crossing fix) · CẤM cộng quantile trực tiếp —
+> tổng hợp bằng aggregate_quantiles MC sim; property P90_tổng ≤ Σ P90_con · model CHỈ đọc adjusted_units
+> (censored demand): stockout ≠ cầu 0 · model_used luôn trung thực; <14d = cold_start khai báo ·
+> GLOBAL LightGBM per-project, TUYỆT ĐỐI không trộn data cross-project (cross-project = feature riêng opt-in
+> k-anonymity k≥5, thiết kế lại) · split theo thời gian; backtest chỉ dùng covariate thật quá khứ + promo-đã-khai
+> (leakage test trong CI) · backtest_results = nguồn duy nhất của forecast:accuracy + promote-gate ·
+> model bậc cao thua SeasonalNaive trên SKU đó → dùng SeasonalNaive`
+
+**Đối chiếu:** dòng cuối chính là `choose_model` fallback (`backtest.py:200-203`); "chỉ đọc adjusted_units" chính là
+`store/forecasts.py:26`; "global per-project" chính là cache khoá theo `project_id` (`model_cache.py:39-41`).
+⚠ **Property `P90_tổng ≤ Σ P90_con`** trong invariants mâu thuẫn với hợp đồng `C-BT03-CALIBRATION-METRICS`,
+vốn ghi *"property P90_tong <= Sum P90_con LOAI vinh vien"* (quantile không cộng dưới được).
+Bản mới thắng; **invariants domain là văn bản chưa cập nhật**.
+
+### 14.2. ADR-009 — Scenario Fabric (nguồn của toàn bộ §7)
+
+```
+id            : 009-scenario-fabric
+index_status  : accepted
+code_verdict  : wired-live 2026-08-04 — forecast:run → artifact → scenarios:lead-time-demand 31ms, check-apis 37/37
+```
+
+**Bối cảnh (vì sao phải có):**
+> *"3 quantile không sinh được đuôi P99/CVaR; cộng quantile sai toán; sample độc lập triệt tiêu cú sốc chung;
+> cube 22.4GB/run không truyền HTTP; 2 query cùng run phải ra CÙNG thế giới"*
+
+Năm áp lực này ánh xạ 1-1 vào code:
+| Áp lực | Lời giải trong code |
+|---|---|
+| 3 quantile không ra P99/CVaR | grid 9 alpha (`global_model.py:21`) + GP tail (`marginal.py:132-142`) |
+| cộng quantile sai toán | cộng theo kịch bản (`generator.py:211`, `artifact.py:566`) |
+| sample độc lập triệt tiêu cú sốc chung | factor copula (`generator.py:186-190`) |
+| cube 22.4 GB/run | `ScenarioSet` **lười**, không vật chất hoá (`generator.py:100-105`) |
+| 2 query cùng run phải cùng thế giới | Philox counter-based (`rng.py:3-12`) |
+
+**Lý do gốc, một dòng:** *"một primitive giải crossing + cộng-quantile + correlation + nội-suy-CR + property-giả"*.
+
+**Khoản CHƯA LÀM được khai báo thẳng trong ADR:** *"cannibalization KHAI BÁO CHƯA LÀM"* — tức là scenario fabric
+**không mô hình hoá hiệu ứng ăn thịt lẫn nhau giữa SKU** (giảm giá A kéo tụt B). Copula bắt được **đồng biến động**,
+không bắt được **thay thế**.
+
+**Sự cố live cùng ngày land (amendment ADR-009):**
+> *"artifact_root parents[5] vo trong container (IndexError la con LookupError → nhan nham missing-demand)
+> + train sync chan event-loop — fix 7ca9b92, bai hoc = **surface moi PHAI chay that trong container 1 lan
+> truoc khi tin** (LUẬT-0 điểm 4)"*
+
+Đây là gốc của hai đoạn code phòng thủ tôi mô tả ở §7.6 (`artifact.py:118-135`) và §3.9 (`asyncio.to_thread`).
+
+### 14.3. Hợp đồng thiết kế `C-BT03-MODELS-MARGINAL` — vì sao ĐÚNG những model đó
+
+Nguyên văn (rút gọn phần liệt kê):
+> *"... intermittent đều ADI>1.32 CV2<=0.49 → Croston / biến động CV2>0.49 → SBA Croston*(1-a/2) /
+> lắt nhắt cực đoan → ADIDA/IMAPA gộp bucket ceil(ADI) ngày, chọn per-SKU qua backtest /
+> mùa vụ >=2 chu kỳ → SeasonalNaive + ETS(A,.,A)/Theta ensemble trọng số backtest /
+> đếm thấp zero-inflated mean<1 → NegBin/ZINB/hurdle ƯU TIÊN sample trực tiếp đuổi đúng /
+> dày đủ SKU → LightGBM quantile GLOBAL per-project GRID 9 ALPHA.
+> Marginal dense KHÔNG được thô: 3 quantile không sinh được P95/P99/CVaR/skew — tăng scenario count KHÔNG chữa marginal thô.
+> ... **LUẬT KHIÊM TỐN: thua SeasonalNaive trên SKU đó → dùng SeasonalNaive**; foundation TS (Chronos/TimesFM)
+> chỉ vào qua cửa backtest offline thắng rõ mới promote."*
+
+**Ba chỗ hợp đồng ĐI TRƯỚC code hiện tại (khoảng cách thật):**
+1. *"ETS/Theta ensemble **trọng số backtest**"* — code dùng **trung bình cộng 50/50 cứng** (`baseline.py:111`),
+   không có trọng số nào học từ backtest.
+2. *"ADIDA/IMAPA gộp bucket **ceil(ADI) ngày**"* — code **không truyền tham số gộp nào**, để statsforecast tự chọn
+   (`intermittent_sf.py:38`). **CHƯA CHẮC** mức gộp thực tế có bằng `ceil(ADI)` không.
+3. *"đếm thấp zero-inflated mean<1 → NegBin/ZINB/**hurdle**"* — repo có NegBin (`croston.quantiles_nbd`,
+   `marginal.IntermittentMarginal`) nhưng **không có ZINB, không có hurdle model** nào.
+
+### 14.4. Hợp đồng `C-BT03-CALIBRATION-METRICS` — vì sao coverage 80±5 và vì sao TÁCH hai họ metric
+
+> *"Nominal [P10,P90]=80% mục tiêu coverage 80±5. **Calibrate RIÊNG theo (lớp cầu, horizon_bucket, model_family)** —
+> hệ số toàn cục che smooth-thừa-phủ đắp intermittent-thiếu-phủ. Adaptive conformal TỪNG ĐUÔI không đối xứng:
+> cửa sổ trượt e_lo=P10-actual, e_hi=actual-P90, **decay 0.98** + change-point reset, áp TRƯỚC sampling.
+> MARGINAL METRICS: statistical_pinball_units ... / MASE <1 thắng seasonal-naive / coverage kèm CI chỉ tính khi
+> đủ observation tối thiểu per segment-horizon / width / WIS; **VÀ economic_decision_loss_vnd =
+> under*lost_margin + over*(holding+markdown)** quy ra tiền bằng unit-econ BT02 — **2 thước TÁCH VAI**.
+> ... PROPERTY SUITE trên sample (quantile không subadditive — property P90_tổng <= Σ P90_con LOẠI vĩnh viễn)"*
+
+**Đối chiếu với code:**
+
+| Yêu cầu hợp đồng | Trạng thái code |
+|---|---|
+| `decay = 0.98` | ✔ `calibrate.py:147` |
+| conformal bất đối xứng `e_lo`/`e_hi` | ✔ `calibrate.py:8-20, 201-202` |
+| áp TRƯỚC sampling | ✔ `artifact.py:458-461` (resolve tại build-time) |
+| calibrate riêng theo `(lớp cầu, horizon_bucket, model_family)` | ⚠ **THIẾU `model_family`**: khoá chỉ là `(demand_class, horizon_bucket)` (`calibrate.py:34`) |
+| `horizon_bucket` nhiều tầng | ⚠ **CHỈ MỘT bucket `h1-28`** (`backtest_run.py:34`) — chưa tách theo tầm |
+| change-point reset | ⚠ **KHÔNG có**; chỉ có decay + cắt `max_points` (`calibrate.py:189-192`) |
+| `width_factor` toàn cục per-SKU | ⚠ **`calibration_factor` là MỘT hệ số cho cả SKU**, đúng cái "hệ số toàn cục" mà hợp đồng cảnh báo — chỉ là toàn cục ở cấp SKU thay vì cấp tenant |
+| WIS (Weighted Interval Score) | ⚠ **KHÔNG có** trong `backtest_results` |
+| `economic_decision_loss_vnd` | ⚠ **KHÔNG có** trong BT03; chỉ có metric thống kê |
+
+Nói cách khác: **`TailCalibrator` (đường scenario) tuân thủ hợp đồng khá sát, còn `calibration_factor`
+(đường forecast chính) thì thô hơn hẳn.** Hai cơ chế hiệu chỉnh song song, chưa hợp nhất.
+
+### 14.5. Promo seam — hợp đồng đòi hơn nhiều so với `promo_pct`
+
+`C-BT03-DATA-COVARIATES` nguyên văn:
+> *"PROMO thực thể hạng nhất **bitemporal** KHÔNG chỉ có boolean:
+> `{promo_id, sku, start/end, mechanic, listed_discount, effective_discount, seller_subsidy, platform_subsidy,
+> exposure, inventory_limit}` — thiếu seam: uplift lẫn baseline → forecast sau promo cao → elasticity nhiễu →
+> preview double-count → newsvendor dư (1 lỗ thủng lan 4 chỗ); model tách baseline/uplift/**post-promo-dip**."*
+
+**Code hiện có:** một cột `promo_pct` (0..100) + `on_promo` nhị phân. **Không có** `mechanic`, `effective_discount`,
+`exposure`, `inventory_limit`, và **không có mô hình `post-promo-dip`** (cầu sụt SAU đợt sale) ở bất kỳ đâu trong BT03.
+Chuỗi hậu quả "1 lỗ thủng lan 4 chỗ" mà hợp đồng cảnh báo (baseline → elasticity → preview → newsvendor)
+mới được chặn ở mắt xích đầu (`_deflate_promo_units`).
+
+**Ranh giới BT03/BT02 (`C-V4-PHILOSOPHY` điểm 3):**
+> *"BT03 phát baseline demand **ĐÓNG BĂNG tại giá tham chiếu**; BT02 sở hữu phản ứng giá nhân qua —
+> **không đếm price effect 2 lần**."*
+
+Đây chính là ý nghĩa của `"reference_price_mode": "FROZEN_AT_REFERENCE"` trong manifest scenario (`artifact.py:491`) —
+một trường trông như metadata vô hại nhưng thực ra là **tuyên bố hợp đồng liên service**.
+
+**Nợ được ghi tên trong DB (`facts forecast.promo-seam.impl`):**
+> *"CHƯA làm: **backtest_series vẫn chạy units raw** (model-choice/width trên dữ liệu chưa deflate) — follow-up"*
+
+→ Xác nhận bằng code: `backtest_run.py:138`, `:206`, `:388` đều dùng
+`units = [float(r["adjusted_units"]) for r in series]` — **KHÔNG qua `_deflate_promo_units`**.
+Trong khi đường phục vụ (`forecast_run.py:1165`, `:1450`) thì CÓ deflate.
+**⇒ Backtest chấm model trên chuỗi CHƯA khử promo, rồi model đó lại chạy trên chuỗi ĐÃ khử promo. Hai phân phối khác nhau.**
+Đây là **khoảng cách train/serve có thật, có tên, chưa đóng**.
+
+### 14.6. Lịch Tết — trạng thái nghiệm thu THẬT
+
+`kb_feature F-TET-CAL-1` hiện là **`verified-PARTIAL`** (từng bị hạ từ `verified-DONE` xuống `UNPROVEN-CHUA-CHAY`
+rồi nâng lại). `verified_by` nguyên văn:
+> *"calendar_effects có trong response nhưng `[]` (Tết 2027 ngoài horizon 56d — không thể chứng minh hệ số live lúc này);
+> calendar_events 30 dòng global; ĐÓNG được khi backtest cửa sổ Tết 2026 lịch sử"*
+
+→ **Cơ chế 3 pha đã có, đã test unit, nhưng CHƯA từng nhân một hệ số Tết nào trong một request thật.**
+Ai đọc §5 đừng nhầm "code chạy" với "đã chứng minh trên dữ liệu Tết".
+
+Bản vá double-count (`facts forecast.tet-cal.v007`) còn bắt thêm một bug dữ liệu:
+> *"FIX seed tet-2027 sai ngày (V005 copy 2026: 02-14..23 → đúng 2027-02-03..12, mùng 1 = 2027-02-06)"*
+
+Hợp đồng còn đòi nhiều hơn code hiện có (`C-BT03-DATA-COVARIATES`):
+> *"TẾT lễ di động NEO THEO LỄ: `days_to_tet` clip[-45,+15] + dummy 3 pha pre(T-20 lõi, ramp T-40)/in/post(T+7);
+> multiplier học **hierarchical partial pooling toàn-cục → ngành → brand → SKU** (Tết mỗi năm 1 mẫu,
+> per-SKU không bao giờ đủ)"*
+
+**Code có:** 3 pha + `pre_days/post_days` per-event + `cal_factor` covariate.
+**Code KHÔNG có:** feature `days_to_tet` liên tục, ramp T-40, và **partial pooling phân cấp** để học hệ số.
+Hệ số Tết hiện nay là **hằng số con người nhập vào bảng `calendar_events`**, không phải học từ dữ liệu.
+
+### 14.7. Cold-start analog — chưa từng chạy thật
+
+`kb_feature F-COLDSTART-ANALOG-1`: **`UNPROVEN-CHUA-CHAY`**, `verified_by`:
+> *"đường 200 cold_start_analog **CHƯA TỪNG chạy thật** (0 project sống có SKU catalog-chưa-bán;
+> test 200-HOẶC-404 không thể đo); nguyên liệu sống (similar-products 5 item 0.31-0.32);
+> cần seed SKU chứng minh — W-COLDSTART-PROVE"*
+
+Đối chiếu §3.8: test hiện hành chấp nhận **cả 200 lẫn 404** nên nó xanh kể cả khi nhánh analog không bao giờ chạy.
+Đúng bệnh "xanh oan" mà LUẬT-0 điểm 5 cảnh báo. Nợ có tên: `W-COLDSTART-PROVE` (trong `W-FC-SMALL-FIXES`).
+
+### 14.8. ADR-006 — vì sao forecast được phép gọi smartsearch
+
+> context: *"Forecast cold-start (§5.3) cần lịch sử SKU tương tự; forecast không có catalog/Vespa;
+> cạnh cross-service duy nhất trước đó = decision→forecast (A6)."*
+> decision: *"Thêm `GET /internal/similar-products` trên smartsearch, header `X-Internal-Token`
+> (env `MINIAI_INTERNAL_TOKEN`), **KHÔNG thuộc public contract**; trả top-k theo embedding similarity;
+> thiếu embedding/Vespa chết → **list rỗng (fail-open)**."*
+> tradeoffs: *"Thêm 1 cạnh runtime forecast→smartsearch ngoài A6; token chia sẻ có rủi ro lộ — mitigate bằng env.
+> **Revisit nếu cạnh thành hot**: export bảng sang forecast hoặc mTLS."*
+
+→ Giải thích tại sao `_get_similar_ids` (`forecast_run.py:153-154`) và `_cold_start_analog`
+(`main.py:1153-1154`) đều **fail-open trả rỗng** thay vì báo lỗi: đó là quyết định ADR, không phải ẩu.
+Và ADR-005b giải thích tại sao `forecast:aggregate` gọi `/internal/products-by-category` chứ **không đọc DB search**:
+*"giữ đúng rationale tự trị dữ liệu; coupling ở tầng API có breaker 503"*.
+
+### 14.9. Nợ kỹ thuật ĐANG MỞ của BT03 (DB `tasks`, status = open)
+
+| W-ID / T-ID | Nội dung |
+|---|---|
+| `W-RECON-METRIC` | Chưa có Prometheus counter cho reconcile method/degrade — hiện chỉ log JSON (`main.py:1304-1312`) |
+| `W-RECON-ROLLOUT` | `FORECAST_RECONCILE` vẫn OFF; bật per-tenant khi có residual thật (seedtest T=3 nên luôn rơi `wls_struct`). Kèm `W-RECON-RESID-CACHE` khi tenant ×10 (23 ms → ~230 ms) |
+| `W-FC-SMALL-FIXES` | (1) `forecast:accuracy` **bỏ qua `window_days` âm thầm, luôn trả 90d**; (2) `W-COLDSTART-PROVE`; (3) backtest cửa sổ Tết 2026 để đo hệ số thật |
+| `W-FC-TEST-ML-SLOW` | 2 test LightGBM (`test_features_quality`, `test_promo_seam`) treo > 15 phút khi máy tải |
+| `W-RUN202-HEARTBEAT-MID` | Handler `forecast_run` là **một `await` dài không heartbeat giữa chừng** — tenant siêu lớn > 1800 s sẽ bị reaper requeue thừa |
+| `T-SW3-ELASTICITY-INTERMITTENT` | Độ co giãn intermittent kẹt 78% within ±0.5 do ~8 SKU OLS thô ước thấp (bỏ ngày bán = 0); đã thử Poisson GLM naive → **tệ hơn** (median 0.638) |
+| `T-GAP-BACKLOG-3DOMAIN` (lát forecast) | 8 khoảng trống: thời tiết · cannibalization/halo · multi-location/channel · covariate sự kiện của tenant · consensus + FVA · backtest theo metric kinh doanh (service level / lost-sale VNĐ) · dự báo hàng trả · giá làm covariate |
+| `kb_domain.gaps` | B4 covariate thời tiết (chỉ khi ngành nhạy, nguồn open-meteo, cần backfill lịch sử) · C1 forecast từ ảnh (thiếu GPU/disk) |
+
+### 14.10. Kỷ luật đo lường bắt buộc trước khi tin bất kỳ số nào (`SK-MEASURE-ENV-FIRST`)
+
+> *"VÒNG-0 PHÉP ĐO: (1) **ĐÚNG CONTAINER** — `docker ps`, có `*-bench-*` đang chạy / flag đang flip = số VỨT;
+> (2) **ĐÚNG ARTIFACT**; (3) **ĐÚNG INDEX**; (4) **ĐÚNG COMMIT** — image = commit đang xét.
+> **Sai 1 điều = VỨT, cấm diễn giải.**"*
+
+Và một cạm bẫy vận hành cụ thể được ghi lại (event 2026-08-06):
+> *"GOTCHA chuỗi: **backtest loop 7 ngày** nên data mới KHÔNG tự lên nấc lgbm —
+> **phải ép `run_backtest_once` TRƯỚC `forecast:run`**."*
+
+→ Ai muốn tái lập bảng §11 phải nhớ: `BACKTEST_INTERVAL = 604800 s` (`backtest_run.py:514`) nghĩa là
+`kv_state.model_choice` có thể **cũ tới 7 ngày** so với dữ liệu. Số dự báo hôm nay có thể đang chạy model
+được chấm từ tuần trước.
+
+Một cạm bẫy đo lường nữa (`facts sw3.coverage-croston-perday-fix`):
+> *"Grader `scripts/grade_forecast.py` đọc `backtest_results` (latest `run_id`) — **lưu ý `run_id` = date collision
+> khi chạy tay cùng ngày, phải lọc `created_at`**."*
+
+Xác nhận bằng code: `backtest_run.py:104` đặt `run_id = "bt_" + date.today().isoformat()` — **chạy backtest hai lần
+cùng ngày sẽ TRỘN hai lần đo vào cùng một `run_id`**, và grader (`grade_forecast.py:44-56`) lấy theo `run_id`
+nên gộp cả hai. Bảng §11.2 của tôi gộp mọi `run_id` nên không dính bẫy này, nhưng §11.3 (chạy grader) thì **có thể dính**
+nếu ai đó đã chạy backtest tay trong ngày.

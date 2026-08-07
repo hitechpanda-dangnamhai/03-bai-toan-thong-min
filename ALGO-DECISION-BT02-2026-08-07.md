@@ -1450,7 +1450,499 @@ Quan sát: mỗi tick ghi 1 dòng `job_runs` job `experiment_gate_sweep`
 
 ### 10.3 Vai trò các grader
 
-<!-- GRADERS_PLACEHOLDER -->
+**Nền thống kê thật sự — `libs/common/confseq.py`** (đây là nơi α được chi tiêu).
+
+`MeanConfSeq` cài **empirical-Bernstein confidence sequence kiểu đặt cược**
+(Waudby-Smith–Ramdas, JRSS-B 2023, `confseq.py:11–13`). Bảo đảm:
+`P(∃n: θ ∉ CI_n) ≤ α` — **đúng đều theo thời gian**, nên nhìn mỗi chu kỳ và
+quyết ngay vẫn hợp lệ.
+
+```
+ψ_E(λ) = ( −ln(1−λ) − λ ) / 4                                  confseq.py:49-51
+
+mỗi quan sát x (đã co về [0,1] là xs, t = n+1):
+  bet:      λ_t = min( sqrt( 2·ln(2/α) / (σ̂²_{t−1}·t·ln(t+1)) ),  λ_max )   :127-130
+  wealth:   log W± += log(1 ± λ_t(xs − m₀))                                  :133-138
+  Bernstein:v_i = 4(xs − μ̂_{i−1})² ;  cộng dồn Σλ, Σλx, Σ v·ψ_E(λ)          :141-144
+  ước lượng co: μ̂_t = (0.5 + Σxs)/(t+1) ;  σ̂²_t = (0.25 + Σ(xs−μ̂)²)/(t+1)  :147-153
+  p-value Ville 2 phía:  p_n = min(1, 2·exp(−sup_n log max(W⁺,W⁻)))          :156
+  CI:  tâm  μ̃_n = Σλ_i X_i / Σλ_i
+       bán kính r_n = ( ln(2/α) + Σ v_i ψ_E(λ_i) ) / Σλ_i                    :158-168
+       kẹp về [0,1], giãn về thang gốc, RỒI GIAO với mọi CI trước đó
+       ⇒ CI_n := ∩_{k≤n} CI_k  (đơn điệu co lại)
+```
+Hằng số `MeanConfSeq`: `alpha=0.05`, `null=0.0`, `lo=−1.0`, `hi=1.0`,
+`lam_max=0.5`, `min_n=2` (sàn 2), `μ̂₀=0.5`, `σ̂²₀=0.25`
+(`confseq.py:68–73`, `:89`, `:98–99`). Chặn `λ ≤ ½` giữ wealth
+`1 ± λ(X−m₀) ≥ ½ > 0` (`:81–83`).
+
+`DiffConfSeq` **KHÔNG** nhét hiệu từng chu kỳ vào một CS (`:191–196`: đo được
+median phát hiện ~286 chu kỳ — mất power vì phí phạm dải cược). Thay vào đó:
+
+```
+mỗi arm 1 CS riêng ở mức α/2, trên reward 0/1 THÔ:               confseq.py:218-220
+  treat   = MeanConfSeq(alpha=α/2, null=(lo+hi)/2, lo, hi)
+  control = MeanConfSeq(alpha=α/2, null=(lo+hi)/2, lo, hi)
+CI hiệu bằng SỐ HỌC KHOẢNG (union bound):                        confseq.py:242-246
+  CI_diff = [ lo_T − hi_C ,  hi_T − lo_C ]      hợp lệ ở α/2 + α/2 = α
+significant() ⇔ CI_diff không chứa 0                             confseq.py:248-251
+```
+Không cần ghép cặp event → **arm lệch cỡ (canary 10% vs control 90%) dùng hết
+dữ liệu** (`:202–203`). Đánh đổi viết ra: `DiffConfSeq` **không có p-value**
+(`:205–206`).
+
+**Ba nơi α bị chia/chặn — kiểm kê đầy đủ**:
+1. `DiffConfSeq` chia α/2 mỗi arm rồi ghép bằng số học khoảng (`:219–220`, `:242–246`);
+2. `MeanConfSeq` chi α qua bound Ville 2 phía, α/2 mỗi wealth — thể hiện ở hệ số
+   `2` trong `p = min(1, 2·exp(−log_w_sup))` (`:156`) và ở `ln(2/α)` (`:90`);
+3. **Nhánh KILL do budget KHÔNG được α bảo kê** (`experiment_gate.py:33–36`) —
+   tỉ lệ kill-oan của nó do quy tắc sizing **S2** kiểm soát, và chính
+   `grade_canary.py` check (D) đo nó bằng máy.
+
+---
+
+**Bảng 6 grader thống kê**
+
+| Grader | Cần DB? | numpy? | Check | Exit |
+|---|---|---|---|---|
+| `grade_confseq.py` | không | không | A,B,C,D | 0/1 |
+| `grade_canary.py` | không | không | A,B,C,D | 0/1 |
+| `grade_switchback.py` | không | không | A,B,C | 0/1 |
+| `grade_ope.py` | không | **có** | A,B,C | 0/1 |
+| `grade_snips.py` | không | **có** | A,B,C,D | 0/1 |
+| `grade_m20_gate.py` | **CÓ** (pg :16024) | không | 0,a0,a,b,c,d | 0/1 |
+
+#### (1) `grade_confseq.py` — CS có thật sự anytime-valid không
+
+Bốn kiểm chứng (`:11–17`), sinh luồng `T` chu kỳ × `arm_n` event/arm,
+`treat ~ Bern(p_t)`, `ctrl ~ Bern(p_c)`, đáp án cài sẵn `δ = p_t − p_c`
+(`:40–46`).
+
+Chuẩn Monte-Carlo dùng chung (`:84–85`):
+`se = sqrt(α(1−α)/m)`, `fpr_bound = α + 2·se`. Với α=0.05, m=300 →
+`se = 0.012583`, `bound = 0.075166`.
+
+| Check | Nội dung | Ngưỡng | Dòng |
+|---|---|---|---|
+| A | FPR của CS khi **không có hiệu ứng**, peek mỗi chu kỳ | `cs_fpr ≤ α + 2·se` | `:110` |
+| B | **Đối chứng**: z-test lặp ngây thơ (peek mỗi chu kỳ ở mức cố định 0.05) | `naive_fpr > 2α = 0.10` — *phải HỎNG mới chứng minh CS là cần thiết* | `:111` |
+| C | δ có bao giờ rời CI không | `cover_miss ≤ α + 2·se` | `:144` |
+| D | Power | `power ≥ 0.90` | `:145` |
+
+Z-test ngây thơ (`:49–65`): cộng dồn `st,nt,sc,nc`; bỏ qua khi `n < 20`;
+`var = p̂_t(1−p̂_t)/n_t + p̂_c(1−p̂_c)/n_c`; bác bỏ khi
+`|p̂_t − p̂_c|/√var > 1.959963984540054` (`_Z975`, `:37`).
+
+Hằng số CLI (`:71–78`): `--m 300` · `--t 200` · `--alpha 0.05` ·
+`--p-control 0.10` · `--delta 0.05` · `--arm-n 50` · `--seed 101` ·
+`--min-power 0.90`. Một `random.Random(seed)` duy nhất (`:82`) chạy tuần tự
+qua cả 2m luồng → xác định, phụ thuộc thứ tự.
+Chi phí mặc định: 2·300·200·100 = **12 triệu** lời gọi `update` — grader offline
+nặng nhất.
+
+```bash
+.venv/bin/python scripts/grade_confseq.py     # in "GRADE CONFSEQ: PASS"
+```
+
+#### (2) `grade_canary.py` — canary hại có bị cắt trong ≤1 chu kỳ không
+
+Chạy `ExperimentGate` thật (`:42–46`). Canary = **10% traffic** (40 event/chu kỳ
+vs control 360).
+
+**Phát hiện vi phạm được ĐO LẠI từ log quyết định**, không tin lời gate (`:77–83`):
+```python
+for i, d in enumerate(decisions):
+    if d.cum_loss > d.loss_budget * trigger_frac or d.ci_hi < 0.0:
+        return i          # breach = chu kỳ đầu tiên một trong hai điều kiện kill đúng
+delay = kill_idx − breach     # yêu cầu ≤ 1
+```
+
+**Sizing S2 — trái tim của check (D)** (`:153–159`):
+```
+var_diff  = p_c(1−p_c)/n_canary + p_c(1−p_c)/n_control
+σ_cycle   = n_canary · sqrt(var_diff)          ← sd/chu-kỳ của loss ký hiệu dưới null
+z99       = 2.3263478740408408
+trigger_D = z99 · σ_cycle · sqrt(max_cycles)
+loss_budget_D = trigger_D / 0.8                ← giải ngược để budget×0.8 = trigger
+```
+Với mặc định: `var_diff = 0.12·0.88/40 + 0.12·0.88/360 = 0.0029333`,
+`σ_cycle = 40·0.054160 = 2.1664`, `trigger_D = 2.32635·2.1664·√60 ≈ 39.04`,
+`loss_budget ≈ 48.8`.
+
+| Check | Nội dung | Tiêu chí | Dòng |
+|---|---|---|---|
+| A | canary hại nặng `δ = −0.08`, budget 30.0 | `KILL` **và** `delay ≤ 1` | `:108`, `:116` |
+| B | thiệt hại tại lúc kill | `cum_loss ≤ loss_budget` (trần khai báo KHÔNG bị vượt) | `:123` |
+| C | hại NHẸ `δ = −0.02`, budget siết 8.0, chạy 240 chu kỳ | `KILL` **và** `"loss_budget_exceeded" in reason` **và** `delay ≤ 1` **và** `cum_loss ≤ budget` | `:129–145` |
+| D | canary VÔ HẠI ×200 sim, budget sized theo S2 | `kill_rate ≤ α + 2·se = 0.080822` | `:167–169` |
+
+> **(C) là kiểm chứng mạnh nhất**: nó đòi cú kill phải được quy cho **đúng lưới
+> budget** (`"loss_budget_exceeded" in reason`), chứng minh hai lưới (CS-harm và
+> budget) **sống độc lập** chứ không phải một lưới bắt hộ lưới kia.
+
+Hằng số CLI (`:88–94`): `--seed 33` · `--p-control 0.12` · `--n-canary 40` ·
+`--n-control 360` · `--max-cycles 60` · `--m-null 200` · `--alpha 0.05`.
+Khác: `loss_budget` cfg_a = **30.0** (`:104`), cfg_c = **8.0** (`:130`),
+`min_cycles = 8`, `min_samples_per_arm = 400` cả ba cfg.
+
+```bash
+.venv/bin/python scripts/grade_canary.py      # in "GRADE CANARY: PASS"
+```
+
+#### (3) `grade_m20_gate.py` — **grader DUY NHẤT cần Postgres**
+
+Chạy gate đầu-cuối trên DB thật: `impression_log` + `experiment_registry` +
+`experiment_gate_audit` qua `run_gate` (`:46`, import in-process).
+
+**Seed đáp-án-cài-sẵn** (`scripts/seed_m20_experiment.py`), gate config ghi vào
+`registry.config["gate"]`: `alpha=0.05, min_cycles=8, min_samples_per_arm=400,
+min_effect=0.0, loss_budget=25.0, loss_trigger_frac=0.8` (`:61–68`).
+
+| Experiment | p(control) | p(treat) | δ | cycles × per_cycle | assign | Kỳ vọng |
+|---|---|---|---|---|---|---|
+| `m20-a-uplift` | 0.10 | 0.22 | **+0.12** | 24 × 120 | hash | **FIRE** |
+| `m20-b-underpowered` | 0.10 | 0.11 | +0.01 | 4 × 100 | hash | **BLOCK** |
+| `m20-c-canary-harm` | 0.12 | 0.04 (canary 20%) | **−0.08** | 12 × 200 | slots | **KILL** |
+
+Tổng ≈ 2880 + 400 + 2400 = **5680 event** (`seed:17`).
+Sizing ghi lại (`seed:73–75`): `n ≈ 2(σ²_t+σ²_c)ln(4/α)/δ² ≈ 700/arm`;
+24 chu kỳ × ~60/arm = 1440/arm cho FIRE dư biên. **δ được NÂNG từ 0.10 lên 0.12**
+vì ở 0.10/1200-mỗi-arm, `ci_lo` đo được là **−0.006** — quá sát cho một grader
+xác định.
+
+| Check | Nội dung | Tiêu chí |
+|---|---|---|
+| (0) | khối lượng seed | `4500 ≤ n_events ≤ 6500` (`:99`) |
+| (a0) | **flag mặc định TẮT** | pop env `MINIAI_EXPERIMENT_AUTO_APPLY`, chạy → vẫn `FIRE`, vẫn audit, nhưng `applied=False`, `auto_apply_enabled=False`, `status` vẫn `active` (`:103–121`) |
+| (a) | FIRE | 7 mệnh đề: `decision=FIRE` ∧ `applied=True` ∧ `status='applied'` ∧ `ci_lo>0` ∧ `cycles ≥ min_cycles` ∧ `n_treat ≥ 400` ∧ `n_control ≥ 400` (`:124–144`) |
+| (b) | BLOCK | `decision=BLOCK` ∧ `status='active'` ∧ (`"insufficient"` ∨ `"ci_not_conclusive"` trong reason) ∧ **không dòng nào `applied`** (`:147–163`) |
+| (c) | KILL ≤1 chu kỳ | `decision=KILL` ∧ `status='killed'` ∧ `delay ≤ 1` (**tính lại từ bảng audit**) ∧ `cum_loss ≤ loss_budget` (`:166–196`) |
+| (d) | audit 100% | với cả 3 experiment: số dòng audit == `n_cycles_evaluated`, và mỗi quyết định có dòng cùng cycle, cùng `decision`, `reason` **không rỗng** (`:199–217`) |
+
+> 🔐 **Mọi truy vấn registry/audit mang CẢ `project_id` LẪN `experiment_id`**
+> (`:73–80`). Lý do ghi ở `:64–67`: grader kết nối bằng **owner nên bypass RLS** —
+> thiếu khoá tenant sẽ lặng lẽ chấm dòng của tenant khác.
+
+Verdict cuối in kèm điểm: `GRADE M20 GATE: PASS (k/5)` (`:221–224`).
+
+```bash
+.venv/bin/python scripts/grade_m20_gate.py \
+  [--dsn postgresql://miniai:miniai@localhost:16024/miniai_decision] \
+  [--project simworld-m20] [--seed 42] [--no-seed]
+```
+⚠ Không có `--no-seed` thì nó **XOÁ** toàn bộ `impression_log`,
+`experiment_registry`, `experiment_gate_audit` của project đó (`seed:105–112`) —
+chỉ trong phạm vi tenant sim. Không cần service decision chạy.
+
+#### (4) `grade_switchback.py` — thiết kế switchback + Horvitz-Thompson
+
+Không thuộc BT02 pricing nhưng cùng bộ evidence-plane. Thế giới:
+`simulator/experiment.py:62`.
+
+```
+z_b ~ N(0,1);  m_b = exp(0.45·z_b)                    ← mức cầu của block
+p_b = 0.35 + 0.30·σ(2.2·z_b)                          ← propensity BIẾT TRƯỚC, gây nhiễu
+a_b = 1[U < p_b]
+λ_t = 2.0·(1 + 0.5·sin(2π(t mod 7)/7))·m_b
+s_t = (1−ρ)a_t + ρ·s_{t−1}       ρ = 0.3              ← carryover, chạy XUYÊN block
+Y_t ~ Poisson( max(1e-9, λ_t + δ·s_t) )               δ = 0.8 = ĐÁP ÁN
+```
+
+```
+bỏ burn-in:   giữ periods có pos ≥ burn_in (mặc định 4)          :46-48
+HT/IPW:       δ̂_HT = mean_t[ a_t·Y_t/p_b − (1−a_t)·Y_t/(1−p_b) ]  :51-61
+foil DiM:     δ̂_DiM = mean(Y|a=1) − mean(Y|a=0)                   :64-77  ← CHỆCH vì p_b ⟂̸ m_b
+bootstrap:    resample đơn vị = BLOCK (period trong block tương quan), 2000 lần,
+              CI percentile ests[50], ests[1950]                  :87-115
+CI kiểm chéo: Var(Σc_b) ≈ n/(n−1)·Σ(c_b−c̄)² ; se = √Var/T ; ±1.96·se  :118-145
+```
+
+| Check | Tiêu chí | Dòng |
+|---|---|---|
+| A | `\|δ̂_HT − 0.8\| ≤ 0.20` **và** `0.8 ∈ CI_bootstrap` | `:197–199` |
+| B | `CI_lo > 0` (phát hiện được hiệu ứng) | `:205` |
+| C | HT gần đáp án hơn DiM **và** DiM lệch > tol | `:211–214` |
+
+> ⚠ **Hai chỗ docstring lệch code** (đáng ghi vào tài liệu):
+> 1. `:23` ghi `--n-blocks 1200`, argparse thực tế mặc định **2500** (`:154`).
+> 2. `:11–12` nói check (C) đòi DiM nằm **ngoài** CI của HT; `c_pass` cài đặt
+>    (`:214`) **đã bỏ** điều kiện đó — nó chỉ còn là chẩn đoán in ra `c_dim_out`
+>    (`:213`, `:218`), lý do hạ cấp ghi ở `:208–210` (phụ thuộc độ rộng CI).
+
+#### (5) `grade_ope.py` — off-policy evaluation (IPS / DR / DM)
+
+Thế giới `simulator/experiment.py:211`, lưới hành động
+`PRICE_MULTS = [0.7, 0.85, 1.0, 1.15, 1.3]` (K=5, `:158`):
+```
+λ(x,m) = base·m^eps        base ~ U(3,8),  eps ~ U(−2.2,−0.8)
+μ(x,a) = m·λ(x,m)          (doanh thu chuẩn hoá)
+π_b(·|x) = softmax(−m / 0.6)      ← thiên giá thấp, PHỦ TOÀN BỘ (overlap đảm bảo)
+π_t(·|x) = softmax(μ(x,·) / 0.25) ← nhọn ở mức tối ưu doanh thu
+r = m · Poisson(λ(x,m))
+```
+
+```
+đặc trưng q̂ (CỐ Ý không khớp dạng thật):  φ = [1, b, e, m, m², bm, em, be]   :49-55
+ridge:  β = (XᵀX + λI)⁻¹Xᵀy,  λ = 1.0                                        :58-62
+cross-fit 2 fold: huấn luyện trên fold ≠ f, dự đoán trên fold = f            :88-127
+w_i = π_t(a_i|x_i) / π_b(a_i|x_i)        ← propensity ĐỌC TỪ LOG              :120
+
+IPS  mỗi vòng = w·r                                                          :131
+DR   mỗi vòng = q̄ + w·(r − q̂(x,a))                                          :137
+DM   mỗi vòng = q̄            ← đối chứng CHỆCH                               :183
+ESS = (Σw)² / Σw²                                                            :65-68
+```
+
+| Check | Tiêu chí | Dòng |
+|---|---|---|
+| A | `\|V̂_IPS − truth\| ≤ 0.30` **và** truth ∈ CI bootstrap | `:203–205` |
+| B | như trên cho DR | `:211–213` |
+| C | `sd(DR) ≤ sd(IPS)` — giảm phương sai thật | `:219` |
+
+ESS chỉ là **cảnh báo**, in `⚠ THẤP` khi `ESS/N < 0.10` nhưng **không ảnh hưởng
+exit code** (`:193–194`).
+CLI (`:145–154`): `--n-rounds 6000` · `--n-contexts 40` · `--seed 11` ·
+`--folds 2` · `--ridge 1.0` · `--n-boot 2000` · `--tol 0.30` · `--ess-warn 0.10`.
+
+#### (6) `grade_snips.py` — self-normalized IPS
+
+Tái dùng `effective_sample_size` + `ips_per_round` **thẳng từ `grade_ope`**
+(`:41`) và cùng thế giới (`:42`) → hai grader nhất quán theo cấu tạo.
+
+```
+V̂_SNIPS = Σ w_i r_i / Σ w_i                                     :48-53
+```
+Lý do tồn tại (`:6–12`): IPS nhân `w·r` trực tiếp nên **đuôi trọng số nặng làm
+phương sai nổ vô hạn**; `E[w]=1` nhưng mẫu hữu hạn `Σw/n ≠ 1`. SNIPS chuẩn hoá
+lại bằng `Σw` (control-variate dạng tỉ số) → (1) giá trị **luôn nằm trong
+`[min r, max r]`** (tổ hợp lồi), (2) phương sai thấp hơn nhiều dưới trọng số
+nặng, đổi lấy độ chệch `O(1/n)` (vẫn nhất quán).
+
+**Bootstrap phải lấy lại chỉ số vòng và tính LẠI tỉ số** — không được bootstrap
+riêng tích `w·r` vì tử và mẫu dùng chung mẫu (`:56–67`, lý do ở `:59–60`).
+
+Chạy **2 chế độ** cùng lượt (`:108`): `chuẩn` (`target_temp = 0.25`) và
+`stress` (`target_temp = 0.05` — π_t gần tham lam → trọng số rất nặng).
+
+| Check | Tiêu chí | Dòng |
+|---|---|---|
+| A | `\|SNIPS − truth\| ≤ 0.30` (chế độ chuẩn) | `:126–127` |
+| B | `sd(SNIPS) ≤ sd(IPS)` (chuẩn) | `:131` |
+| C | dưới stress: `\|SNIPS − truth\| ≤ 0.30` **và** `sd(SNIPS) < sd(IPS)` — **dấu `<` NGHIÊM NGẶT**: giảm phương sai phải là thật, không được hoà | `:135–137` |
+| D | `SNIPS ∈ [min r, max r]` ở **CẢ HAI** chế độ (tính chất giải tích) | `:143–145` |
+
+---
+
+**Bốn grader kinh tế (kiểm chứng chính các thuật toán §3–§7)**
+
+#### (7) `grade_optimizer.py` — mean-CVaR có thắng Lerner-điểm không
+
+Chấm `price_optimizer.py` end-to-end: **ước lượng → posterior → giá**, dùng
+chính `estimate_elasticity_ols` + `shrink_hierarchical` thật làm đầu vào
+(`:57–60`).
+
+**Thước đo: PROFIT-CAPTURE RATIO** (`:19–23`) — `realized / oracle ∈ (0,1]`,
+**không thứ nguyên nên SKU khác sản lượng so sánh được với nhau**:
+```
+realized(P) = (P − c)·(P / anchor)^eps_true                        :145-146
+oracle      = max profit trên CÙNG feasible_band dưới eps_true,
+              lưới 401 điểm                                        :149-153
+SKU có oracle ≤ 0 bị bỏ                                            :219-221
+CVaR(ratio): sort tăng, k = max(1, ceil(α·n)), mean k giá trị nhỏ nhất  :159-165
+```
+
+**Ba chính sách, CÙNG rail** (clamp, sàn trên vốn, làm tròn tâm lý) — chỉ khác
+luật (`:16–18`):
+| Chính sách | Luật | Dòng |
+|---|---|---|
+| `lerner` | `lerner_price(c, eps_mean, 0.15)` rồi `apply_band_and_round` | `:224–228` |
+| `opt_ev` | `optimize_price(risk_aversion=0.0)` | `:232–233` |
+| `opt_cvar` | `optimize_price(risk_aversion=λ)` | `:236–237` |
+
+**Bộ đếm nổ** (`:226–227`): tăng `n_lerner_explode` khi
+`eps_mean < −1.0` **và** `p_lerner_raw > current·(1+clamp)` — đo trực tiếp bệnh
+`dP*/deps = c/(1+eps)²` của §4.1.
+
+Posterior sd = **`se` OLS chưa shrink**, thiếu thì **0.6** (`:215`, "rộng khi
+chưa identify"). Anchor `P0 = ref_price` (`:214`).
+
+Hằng số CLI (`:256–269`): `--seeds 12` · `--skus 60` (⇒ **720 SKU-instance**) ·
+`--days 300` · `--clamp 0.60` (*cố ý RỘNG để so LUẬT ĐỊNH GIÁ, không phải so
+cái rail*, `:259–261`) · `--floor-margin 0.05` · `--lam 0.15` · `--alpha 0.10` ·
+`--tail 0.05` · `--eps-tol 0.02` · `--cvar-margin 0.05`.
+Khác: `DEFAULT_MARGIN = 0.15` (`:76`), lưới oracle 401 (`:151`), seed RNG
+`seed ^ 0xB4CE` (`:200`), λ-frontier `[0.0, 0.15, 0.30, 0.60, 0.90]` (`:276`),
+cột CVaR10% cố định (`:303`).
+
+Dải tham số thế giới (`simulator/world.py:245–247`):
+`ref_price ~ U(20 000, 2 000 000)`, `cost = ref_price·U(0.55, 0.8)`,
+`eps = U(−2.5, −0.8)`; lớp cầu 40/30/15/15% smooth/intermittent/lumpy/zero-inflated.
+
+**Tiêu chí PASS** (`:319–327`):
+```
+ev_ok   = EV(opt_cvar)     ≥ EV(lerner)     − 0.02     ← chỉ được thua EV tí xíu
+cvar_ok = CVaR5%(opt_cvar) ≥ CVaR5%(lerner) + 0.05     ← PHẢI thắng đuôi rõ rệt
+overall = ev_ok and cvar_ok
+```
+
+> 📌 **Số đo được ghi lại** — không nằm trong grader mà trong chính module bị
+> chấm, `price_optimizer.py:12–14`:
+> *"đưa **trung bình** posterior vào một ánh xạ lồi gần điểm kỳ dị biến sai số
+> ước lượng nhỏ gần eps≈−1 thành sai giá thảm hoạ. **Backtest: Lerner-điểm chỉ
+> bắt được ~80% lợi nhuận khả thi trung bình và ~20% ở đuôi 5% tệ nhất.**"*
+> Và `:36–37`: *"nâng sàn lợi nhuận tệ-nhất-tuyệt-đối với chi phí kỳ vọng nhỏ
+> (xem `scripts/grade_optimizer.py` cho frontier đo được)."*
+
+```bash
+.venv/bin/python scripts/grade_optimizer.py    # OFFLINE THUẦN, chỉ cần numpy
+                                               # in "GRADE OPTIMIZER: PASS"
+```
+Được nối vào `scripts/qc_v4.py:70` làm grader tầng A.
+
+#### (8) `grade_newsvendor.py` — mức phục vụ đạt được có khớp CR không
+
+Chấm `replenishment_advice` **trên DB thật** so với sim-world truth. Ba kiểm
+chứng độc lập (`:2–11`).
+
+Parse trace (`:50–78`), khoá bắt buộc:
+`{CR, S, on_hand, qty_raw, qty, lead_time, moq, pack_size}` (`:59`).
+
+**(A) CR có đúng công thức không** — `expected_cr` (`:81–88`) soi gương
+`replenish.critical_ratio`. Dải chấp nhận có tính **nhiễu giá vốn ±5%**
+(`simulator/world.py:446` cho `unit_cost = cost·U(0.95,1.05)`); CR giảm đơn điệu
+theo cost nên dải là `[cr(1.05c), cr(0.95c)] ± 0.02` (`:353–356`, `:367–371`).
+> Lý do viết ra: *"CR cực nhạy khi margin mỏng."*
+
+**(B) mức phục vụ THỰC ĐẠT** — `achieved_service` (`:171–200`), Monte-Carlo
+`P(cầu trong chu kỳ bảo vệ ≤ S)`:
+```
+mỗi lần lặp: lead ~ pmf lead_time
+             total = Σ_{j=0}^{lead+review−1} demand(day0+j)   ← chu kỳ bảo vệ = lead + review
+             hits += (total ≤ S)
+achieved = hits / mc ;   q_target = min(max(CR_trace,0), 0.99) ;   diff = achieved − q_target
+```
+
+**(C) số học đơn hàng** — từ `qty_raw` đã chứa on_hand/on_order/lot 5, chỉ kiểm
+lại bước MOQ/pack (`:203–218`, lý do ở `:411–412`).
+
+| Check | Tiêu chí | Dòng |
+|---|---|---|
+| A | `median\|ΔCR\| ≤ 0.02` **và** 0 vi phạm dải | `:436` |
+| B | `median\|diff\| ≤ 0.10` **và** ≥ **70%** SKU trong ±0.15 **và** `\|mean(diff)\| ≤ 0.10` | `:453` |
+| C | `mismatches == 0` | `:460` |
+
+CLI (`:272–296`): `--project` (bắt buộc) · `--dsn` (mặc định port 16024) ·
+`--truth` (mặc định `data/sim_truth_<project>.json`) · `--since` (mặc định
+now − 24h) · `--mc 2000` · `--review 7` · `--seed 7`.
+**Exit 2** = không đo được: thiếu `asyncpg` (`:301`), 0 dòng decision (`:325`),
+0 dòng parse được (`:346`).
+
+```bash
+.venv/bin/python scripts/grade_newsvendor.py --project simworld3 \
+  --since 2026-08-04T18:19:00+00:00       # CẦN postgres + file truth
+```
+
+#### (9) `grade_elasticity.py` — có khôi phục được eps thật không
+
+Nguyên tắc SIM-WORLD (`:2–6`): *"thế giới ghi eps thật của từng SKU vào
+`data/sim_truth_<project>.json`. Một estimator đúng, được cho ăn thang giá +
+doanh số thực hiện của thế giới, phải khôi phục lại nó."*
+
+```
+err = |eps_DB − eps_truth|                                        :97
+med    = median(errors)
+within = share(err ≤ 0.50)
+```
+Báo cáo tách theo `method` (`:102–105`).
+
+| Hằng số | Giá trị | Dòng |
+|---|---|---|
+| `TARGET_MEDIAN` | **0.30** | `:34` |
+| `TARGET_WITHIN` | **0.50** (nửa dải) | `:35` |
+| `TARGET_WITHIN_SHARE` | **0.80** | `:36` |
+| DSN | env `MINIAI_DECISION_DSN`, mặc định port 16024 | `:30–33` |
+| `--project` | `simworld1` | `:79` |
+
+PASS ⇔ `med ≤ 0.30` **và** `within ≥ 0.80` (`:111`).
+**Exit 2** khi thiếu file truth (`:42`); **exit 1** khi truth ∩ DB rỗng (`:87`).
+Không có cờ `--dsn` — chỉ đổi được qua env.
+
+> 📌 Fact rail liên quan (`sw3.elasticity-min-segments-blocks-ols` /
+> `sw3.elasticity-recovered-daily-ols`): đây chính là grader đã bắt được ROOT
+> CAUSE *"elasticity 60/60 SKU rơi về pooled_prior vì `MIN_SEGMENTS=8` chặn OLS"*
+> và xác nhận đường daily-OLS phục hồi (commit `de9a49a`, world simworld3 40 SKU).
+
+#### (10) `grade_markdown_ev.py` — 11 kiểm chứng, grader NẶNG nhất
+
+Chấm `outcome_ledger.py` (`run_outcome_ledger_once`, `outcome_window_days`,
+`markdown_predicted_ev`, `_markdown_realized_ev`) **cộng** guard anti-oscillation
+trong `decisions_run.py` (`:58–67`). Đóng nợ **W-OUTCOME-MARKDOWN-EV** bằng
+đường "sim đáp-án-cài-sẵn" (D-M20-GATE-SEED-NOT-WAIT) để **không ai phải chờ
+90 ngày** dữ liệu markdown thật (`:4–11`).
+
+Thế giới truth (`simulator/markdown_world.py`): mỗi ngày
+`λ = λ₀·(price/price_before)^eps` chặn bởi tồn còn lại (`:241–243`), song song
+một **đường kỳ vọng KHÔNG nhiễu** `u_exp = min(λ, remaining_exp)` (`:247–250`)
+→ cho ra `truth.realized_ev` (có nhiễu Poisson) và `truth.expected_ev` (không
+nhiễu). Hằng số: `WINDOW_DAYS = 90`, `HOLDING_RATE_ANNUAL = 0.25`,
+`QUIET_DAYS = 30`, `AGE_DAYS_CHOICES = (30,45,59,65,80,95,120)`,
+`eps = −U(1.6, 3.2)`.
+
+| # | Kiểm chứng | Tiêu chí | Dòng |
+|---|---|---|---|
+| 0 | khối lượng seed | `n_sales == n_truth·2·window` **và** `n_dec == n_truth` | `:350–352` |
+| 1 | cửa sổ | `outcome_window_days("slow_mover_alert") == truth.window_days` — **máy tự khẳng định, không copy tay hằng số ở 2 file** | `:358–360` |
+| 2 | phủ | mọi decision_id đáp án đều có dòng outcome | `:380–382` |
+| 3 | dòng có nghĩa | `realized_ev` không NULL **và** `note` bắt đầu bằng `"markdown_90d"` **và** `predicted_ev` không NULL **và** `window_days == 90` | `:389–396` |
+| 4 | **khớp tới TỪNG ĐỒNG** | `\|realized_DB − truth.realized_ev\| ≤ 1.0 VND` mọi SKU | `:415–425` |
+| 5 | clear-rate | `_rel(clear_đo, clear_kỳ_vọng) ≤ 0.20` **và** `units_đo == units_truth` chính xác | `:437–457` |
+| 6 | hiệu chuẩn rổ | `_rel(Σrealized_DB, Σexpected_noiseless) ≤ 0.20` **và** ≥ **70%** SKU trong ±0.40 | `:465–471` |
+| 7 | **idempotency** | chạy lại job → `count(*) GROUP BY decision_id HAVING count>1` = **0** | `:484–491` |
+| 8 | cổng tuổi | decision markdown 80 ngày tuổi (< 90) → **0 dòng outcome** | `:497–503` |
+| 9 | loại trừ cùng lượt | mọi SKU markdown có `units_30d == 0` đo **tại thời điểm alert**, dùng ĐÚNG mệnh đề của `_get_units_30d` | `:169–179` |
+| 10 | bất biến hậu-4625cd7 | với dòng probe `status='superseded'`: `n_recent == 0` và markdown **không** bị chặn | `:556` |
+
+**Hằng số dung sai** (`:84–96`): `CALIBRATION_TOL = 0.20` ·
+`PER_SKU_TOL = 0.40` · `PER_SKU_MIN_SHARE = 0.70` · **`EXACT_TOL_VND = 1.0`** ·
+`IMMATURE_AGE_DAYS = 80`.
+
+> 📌 **SỐ ĐO ĐƯỢC ghi trong grader** (`:78–83`), giải thích vì sao 20% và vì sao
+> **chỉ ở cấp rổ**:
+> *"realized-EV là HIỆU của hai biên lãi, mỗi vế mang nhiễu Poisson của vài trăm
+> đơn hàng, nên **sai số TỪNG SKU so đường kỳ vọng đo được tới ±60%** dù công
+> thức đúng tuyệt đối (ca (4) chứng minh riêng: khớp tới từng đồng). Gộp rổ thì
+> nhiễu triệt tiêu và 20% trở thành lằn ranh có nghĩa: lệch hơn thế là thế giới
+> hoặc công thức sai BẢN CHẤT chứ không phải xui."*
+
+> 📌 **Phát hiện về TẦM VỚI của bug bandit-vs-markdown** (`:259–263`):
+> `start_decisions_loop` **ngủ interval SAU KHI** lượt chạy kết thúc, nên hai
+> lượt scheduler cách nhau **> 24h** và đề xuất của lượt trước **luôn rơi ngoài**
+> cửa sổ guard 24h → **chỉ `POST /v1/decisions:run` gọi tay mới va chạm được**.
+> Giá một lần va chạm được định lượng (`:295–298`):
+> `capital = Σ on_hand·cost`; `delay_cost_1d = capital·0.25/365` (chi phí trễ
+> markdown 1 ngày) — đây chính là con số **877k VND/ngày/lần** trong
+> `D-BANDIT-YIELD-MD`.
+
+```bash
+.venv/bin/python scripts/grade_markdown_ev.py [--project simworld-md] [--no-seed]
+# in "GRADE MARKDOWN-EV: PASS (11/11)"
+```
+⚠ **GHI DB**: mặc định reseed tenant (`reset=True`, `:326`), chèn/xoá dòng probe,
+chạy job outcome **hai lần**. Bước (v) quét **mọi tenant** (`:265–292`).
+**Không offline, không chỉ-đọc.**
+
+---
+
+**Quy ước exit code chung của bộ grader**: `0 = PASS` · `1 = FAIL` ·
+`2 = KHÔNG ĐO ĐƯỢC` (thiếu file truth / thiếu asyncpg / không có dữ liệu).
+`grade_optimizer.py` và `grade_markdown_ev.py` không bao giờ trả 2.
+
+Chuỗi verdict grep được cho CI: `GRADE OPTIMIZER: PASS` · `GRADE NEWSVENDOR: PASS` ·
+`GRADE MARKDOWN-EV: PASS` · `GRADE CONFSEQ: PASS` · `GRADE CANARY: PASS` ·
+`GRADE SWITCHBACK: PASS` · `GRADE OPE: PASS` · `GRADE SNIPS: PASS` ·
+`GRADE M20 GATE: PASS` · và cho elasticity là `PASS  elasticity recovery meets target.`
+`scripts/qc_v4.py:67–72` nối optimizer + newsvendor vào tầng A với timeout 400s
+(`qc_v4.py:79`).
 
 ---
 
@@ -1784,7 +2276,29 @@ curl     .../v1/decisions:insights?kind=advice_scorecard
 curl -XPUT .../v1/config -d '{"pricing_mode":"robust"}'   # rollback = 1 API call, không deploy
 ```
 
-<!-- GRADER_CMDS_PLACEHOLDER -->
+**Bộ grader (chi tiết §10.3)** — chạy từ `/home/hai-soft/projects/icpp/mecom/project`:
+
+```bash
+# ---- OFFLINE THUẦN (không cần docker/DB) ----
+.venv/bin/python scripts/grade_optimizer.py     # mean-CVaR vs Lerner-điểm  -> GRADE OPTIMIZER: PASS
+.venv/bin/python scripts/grade_confseq.py       # anytime-validity của CS   -> GRADE CONFSEQ: PASS
+.venv/bin/python scripts/grade_canary.py        # canary hại, kill ≤1 chu kỳ-> GRADE CANARY: PASS
+.venv/bin/python scripts/grade_switchback.py    # HT/IPW switchback         -> GRADE SWITCHBACK: PASS
+.venv/bin/python scripts/grade_ope.py           # IPS / DR / DM             -> GRADE OPE: PASS
+.venv/bin/python scripts/grade_snips.py         # SNIPS self-normalized     -> GRADE SNIPS: PASS
+
+# ---- CẦN POSTGRES (docker compose, port 16024) ----
+.venv/bin/python scripts/grade_elasticity.py --project simworld1      # chỉ-đọc + file truth
+.venv/bin/python scripts/grade_newsvendor.py  --project simworld3 \
+        --since 2026-08-04T18:19:00+00:00                             # chỉ-đọc + file truth
+.venv/bin/python scripts/grade_m20_gate.py    --project simworld-m20  # GHI: reseed tenant sim
+.venv/bin/python scripts/grade_markdown_ev.py --project simworld-md   # GHI: reseed + chạy job 2 lần
+
+# tầng A của QC (optimizer + newsvendor, timeout 400s)
+.venv/bin/python scripts/qc_v4.py
+```
+⚠ Hai grader cuối **GHI VÀO DB** (xoá + seed lại tenant sim của chúng). Dùng
+`--no-seed` để chấm trên dữ liệu đã seed sẵn mà không reset.
 
 ---
 
@@ -1801,10 +2315,20 @@ curl -XPUT .../v1/config -d '{"pricing_mode":"robust"}'   # rollback = 1 API cal
    `method='ols'`**. Nhưng tôi không grep hết mọi entrypoint để chứng minh
    `_refresh_elasticity` không bao giờ được gọi ở runtime.
 
-3. **CHƯA CHẮC: nội dung chính xác của `libs/common/confseq.py::DiffConfSeq`.**
-   Tôi đọc hợp đồng qua docstring của `experiment_gate.py` (empirical-Bernstein
-   per-arm + union bound) chứ chưa đọc trực tiếp file cài đặt trong lượt này.
-   Công thức bound cụ thể xem §10.3.
+3. ~~CHƯA CHẮC về `DiffConfSeq`~~ — **ĐÃ GIẢI**: công thức đầy đủ ở §10.3
+   (empirical-Bernstein betting CS + union bound α/2 mỗi arm).
+   Còn lại **CHƯA CHẮC: hằng số `null=0.0`, `lo=−1.0`, `hi=1.0` mặc định của
+   `MeanConfSeq`** (`confseq.py:69–71`) không khớp cách `DiffConfSeq` dùng nó
+   (`lo=0.0, hi=1.0, null=(lo+hi)/2 = 0.5`, `confseq.py:212–220`). Mặc định của
+   `MeanConfSeq` dường như không có caller nào trong BT02 — tôi không xác minh
+   được nó có caller khác ngoài decision service hay không.
+
+3b. **PHÁT HIỆN (không phải CHƯA CHẮC) — 2 chỗ docstring lệch code trong
+   `scripts/grade_switchback.py`**: (a) `:23` ghi `--n-blocks 1200`, argparse thực
+   tế **2500** (`:154`); (b) `:11–12` nói check (C) đòi DiM nằm ngoài CI của HT,
+   nhưng `c_pass` (`:214`) **đã bỏ** điều kiện đó (còn là chẩn đoán in ra). Lý do
+   hạ cấp ghi tại `:208–210`. Không ảnh hưởng BT02 pricing nhưng ai đọc docstring
+   mà tin sẽ hiểu sai grader đang bảo đảm gì.
 
 4. **CHƯA CHẮC: `service_level` (config) vs `service_level_floor` (tham số
    `order_up_to`) có được nối với nhau không.** Trong `kinds.replenishment_advice`,
