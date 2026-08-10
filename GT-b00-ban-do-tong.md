@@ -216,18 +216,63 @@ Nhờ vậy shop cứ **thử lại thoải mái khi mạng lỗi** mà không s
 - `errors` — sai phong bì, **có chỉ số dòng** để biết cái nào hỏng; sai ruột thì rơi vào bảng `dead_events`
   (không mất, mổ xẻ được sau).
 
-#### Ruột (`payload`) theo từng loại — hợp đồng thật
+#### Đủ 13 loại event — ruột là gì, ai ăn, dùng làm gì
 
-| `event_type` | Trường bắt buộc trong payload | Ràng buộc |
-|---|---|---|
-| `purchase.completed` | `order_ref`, `items[]` | mỗi item: `product_id`, `qty ≥ 0`, `unit_price` **số nguyên** ≥ 0; `items` ít nhất 1 dòng |
-| `order.returned` | `order_ref`, `items[]` (+ `reason` tuỳ chọn) | cùng hình dạng `items` như trên |
-| `stock.out` | `product_id` | |
-| `price.changed` | `product_id`, `new_price` (+ `old_price` tuỳ chọn) | giá là **số nguyên** ≥ 0 |
-| `promo.scheduled` | `product_ids[]`, `discount_pct`, `start`, `end` | `0 ≤ discount_pct ≤ 100`; **`end` phải sau `start`** |
+> ⚠ **Câu hỏi của học viên: "phong bì nói `event_type` có 13 giá trị, sao bảng payload chỉ liệt kê 5?"**
+> Vì bảng trước chỉ lọc **5 loại mà BT03 nhận**. Dưới đây là **đủ 13**, đúng theo `PAYLOAD_MODELS`
+> (`libs/common/contracts/events.py:130`) — enum này **đóng**, gửi loại thứ 14 là bị từ chối ngay ở cửa.
 
-Chú ý `unit_price` và `new_price` khai kiểu **`int`** ngay tại hợp đồng — tiền đi vào hệ đã là số nguyên (đồng)
-từ ngoài cửa, chứ không phải đến bảng `demand_daily` mới ép kiểu.
+**Nhóm 1 — HÀNH VI NGƯỜI DÙNG** (chỉ BT01 ăn; đây là thứ dạy máy biết cái gì đáng hiện lên trước)
+
+| `event_type` | Ruột `payload` | Ràng buộc | Dùng làm gì (đọc từ code) |
+|---|---|---|---|
+| `product.viewed` | `product_id` | | tín hiệu phổ biến; hồ sơ người dùng |
+| `product.clicked` | `product_id`, `position`, `source` | `position ≥ 1`; `source` chỉ `"search"` hoặc `"reco"` | học xếp hạng (LTR), bandit, hồ sơ người dùng — `learning_jobs.py`, `bandit.py`, `user_profile.py` |
+| `cart.added` | `product_id`, `qty` | `qty ≥ 0` | tín hiệu ý định mạnh hơn click — `reco.py`, `learning_jobs.py` |
+| `review.submitted` | `product_id`, `rating` (+ `review_id`, `review_text`) | `1 ≤ rating ≤ 5`; text ≤ 2000 ký tự | tín hiệu chất lượng — `learning_jobs.py` |
+
+`position` và `source` tồn tại vì một cú click ở **vị trí 1** không cùng giá trị với click ở **vị trí 20**:
+không ghi vị trí thì không khử được thiên lệch vị trí, và mô hình sẽ học nhầm "cái nào tôi để lên đầu thì cái
+đó tốt".
+
+**Nhóm 2 — GIAO DỊCH** (cả ba bài toán cùng ăn)
+
+| `event_type` | Ruột `payload` | Ràng buộc | Dùng làm gì |
+|---|---|---|---|
+| `purchase.completed` | `order_ref`, `items[]` | mỗi item `product_id` · `qty ≥ 0` · `unit_price` **int** ≥ 0; `items` ≥ 1 dòng | **xương sống**: cầu cho BT03, doanh thu cho BT02, tín hiệu mua cho BT01 |
+| `order.returned` | `order_ref`, `items[]` (+ `reason` ≤ 256 ký tự) | cùng hình dạng `items` | trừ vào cầu **ngày trả** (BT03), điều chỉnh doanh thu (BT02) |
+
+**Nhóm 3 — TRẠNG THÁI HÀNG HOÁ**
+
+| `event_type` | Ruột `payload` | Ràng buộc | Dùng làm gì |
+|---|---|---|---|
+| `stock.out` | `product_id` | | **BT03**: bật cờ `stockout` → bù cầu bị che (mục E). **BT01**: đặt `products.availability='OUT_OF_STOCK'` (`state_apply.py:11`) — hết hàng thì đừng hiện lên đầu |
+| `stock.level` | `product_id`, `on_hand_qty` | `qty ≥ 0` | **BT01**: `on_hand_qty ≤ 0` cũng coi là hết hàng (`state_apply.py:12`). **BT02**: tồn kho để tính nhập bao nhiêu. BT03 **không** nhận |
+| `price.changed` | `product_id`, `new_price` (+ `old_price`) | giá là **int** ≥ 0 | **BT03**: cột `price`. **BT02**: học co giãn giá. **BT01**: cập nhật `products.price` (`state_apply.py:14`) |
+| `cost.recorded` | `product_id`, `unit_cost`, `qty` (+ `supplier_ref`) | tiền **int** ≥ 0 | **BT02**: giá vốn → biên lãi → chốt chặn *bán-dưới-vốn*. BT03 **không** nhận (dự báo cầu không cần biết vốn) |
+
+**Nhóm 4 — THƯƠNG MẠI & VÒNG PHẢN HỒI**
+
+| `event_type` | Ruột `payload` | Ràng buộc | Dùng làm gì |
+|---|---|---|---|
+| `promo.scheduled` | `product_ids[]`, `discount_pct`, `start`, `end` | `0 ≤ discount_pct ≤ 100`; **`end` phải sau `start`** | **BT03**: học hệ số uplift `k`, tô `promo_pct` cho từng ngày. **BT02**: chốt chặn khuyến mãi. Loại **duy nhất** mang một **khoảng thời gian** thay vì một thời điểm |
+| `competitor.price` | `product_id`, `competitor_price` (+ `competitor_ref`) | giá **int** ≥ 0 | **BT02**: giá đối thủ vào bài toán định giá — `state_rollup.py`, `decisions_run.py` |
+| `decision.feedback` | `decision_id`, `action` (+ `outcome_note`) | `action` chỉ `"accepted"` hoặc `"dismissed"` | **vòng phản hồi**: người ta có nghe khuyến nghị của máy không, và kết quả ra sao |
+
+`decision.feedback` là loại đặc biệt: mọi loại khác kể chuyện **cửa hàng**, riêng nó kể chuyện **về chính
+miniAI** — máy khuyên gì và người có nghe không. Không có nó thì hệ không bao giờ biết mình khuyên đúng hay sai.
+
+#### Ba điều rút ra từ bảng 13 loại
+
+1. **`unit_price` · `new_price` · `unit_cost` · `competitor_price` đều khai kiểu `int`** ngay tại hợp đồng —
+   tiền vào hệ đã là **số nguyên (đồng)** từ ngoài cửa, chứ không phải đến `demand_daily` mới ép kiểu. Đây là
+   bất biến tiền tệ, chặn từ cổng.
+2. **Enum đóng + ruột kiểm theo loại.** Sai loại → từ chối ở cửa. Đúng loại nhưng ruột sai (thiếu `qty`, bịa
+   tên cột) → rơi vào bảng `dead_events`, **không mất**, mổ xẻ được sau. Không có đường nào để dữ liệu rác
+   lặng lẽ chui vào `demand_daily`.
+3. **BT03 chỉ ăn 5/13.** Ba loại hành vi và `review.submitted` là chuyện của BT01; `stock.level`,
+   `cost.recorded`, `competitor.price`, `decision.feedback` là chuyện của BT02. Cùng một cửa, ai việc nấy —
+   nên `skipped` là hoạt động bình thường, không phải lỗi.
 
 #### Gửi thật trông như thế nào — hai header bắt buộc
 
