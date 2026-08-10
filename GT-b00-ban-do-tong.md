@@ -63,24 +63,58 @@ hoạ. SKU: **`ld-srm-cerave`** (sữa rửa mặt CeraVe) của shop `demoshop`
 
 #### TẦNG 1 — ngày 31/05, bốn lượt mua rời rạc
 
-Bốn khách khác nhau mua trong ngày. Máy bán hàng bắn bốn gói tin, mỗi gói một dòng trong `raw_events`:
+Bốn **khách khác nhau**, bốn **đơn hàng khác nhau**, mỗi đơn là một dòng trong `raw_events`. Đây là bốn dòng
+thật, đủ mọi cột nhận dạng:
 
-| Giờ | qty | unit_price |
-|---|---|---|
-| 10:04:41 | 5 | 355.000 |
-| 11:29:24 | 1 | 355.000 |
-| 11:41:42 | 1 | 355.000 |
-| 12:59:13 | 1 | 355.000 |
+| Giờ | `event_id` | `order_ref` | khách | qty | unit_price |
+|---|---|---|---|---|---|
+| 10:04:41 | `ds8-ld-srm-cerave-…-buy` | `ds-ord-ld-srm-cerave-2026-05-31` | `u350` | 5 | 355.000 |
+| 11:29:24 | `ds8-ld-taytrang-garnier-…-buy` | `ds-ord-ld-taytrang-garnier-2026-05-31` | `u124` | 1 | 355.000 |
+| 11:41:42 | `ds8-ld-kcn-anessa-…-buy` | `ds-ord-ld-kcn-anessa-2026-05-31` | `u319` | 1 | 355.000 |
+| 12:59:13 | `ds8-ld-toner-klairs-…-buy` | `ds-ord-ld-toner-klairs-2026-05-31` | `u155` | 1 | 355.000 |
 
-Hình dạng thật của một gói tin (đọc từ cột `payload`):
+> ⚠ **Câu hỏi rất đúng của học viên: "4 lượt mua mà sao chỉ thấy 1 đơn?"**
+> Đó là lỗi trình bày của bản trước — nó rút gọn `order_ref` thành `"..."` nên đọc ra như thể cả bốn lượt
+> chung một đơn. Sự thật: **bốn `event_id` khác nhau, bốn `order_ref` khác nhau, bốn khách khác nhau**
+> (`u350` · `u124` · `u319` · `u155`). Bảng trên là dữ liệu nguyên trạng, không rút gọn nữa.
+
+#### Một event = một ĐƠN HÀNG = một GIỎ nhiều mặt hàng
+
+Đây là chỗ dễ hiểu nhầm nhất, và nhìn payload thật là thông ngay. Toàn văn đơn lúc 11:29:24:
 
 ```json
-{ "items": [ { "product_id": "ld-srm-cerave", "qty": 5, "unit_price": 355000 } ],
-  "order_ref": "..." }
+{
+  "order_ref": "ds-ord-ld-taytrang-garnier-2026-05-31",
+  "items": [
+    { "product_id": "ld-taytrang-garnier", "qty": 4, "unit_price": 156000 },
+    { "product_id": "ld-kcn-anessa",       "qty": 1, "unit_price": 553000 },
+    { "product_id": "ld-srm-cerave",       "qty": 1, "unit_price": 355000 }
+  ]
+}
+```
+
+Chị `u124` đi mua **nước tẩy trang Garnier** (4 chai) — đó là món chính, và tên đơn được đặt theo nó. Nhưng
+trong cùng giỏ hàng chị lấy thêm 1 kem chống nắng Anessa và **1 chai CeraVe**. Ba đơn 11:29 · 11:41 · 12:59
+đều là kiểu đó: **đơn của SKU khác, nhưng trong giỏ có kèm CeraVe**. Chỉ đơn 10:04 mới thực sự là "đơn CeraVe".
+
+Rút ra ba điều, đều quan trọng cho các bài sau:
+
+1. **`items` là một MẢNG.** Một đơn chứa nhiều dòng hàng. Muốn biết một SKU bán bao nhiêu thì phải **mở mảng
+   ra** (`jsonb_array_elements`) rồi cộng theo `product_id` — không đếm số đơn.
+2. **Đếm đơn ≠ đếm hàng.** Ngày 31/05 CeraVe có mặt trong **4 đơn** nhưng bán **8 chai**. Ai đếm đơn sẽ ra 4
+   và sai gấp đôi.
+3. **`order_ref` chỉ là tên gọi của đơn**, không phải nhãn phân loại mặt hàng. Đơn tên "garnier" vẫn chứa
+   CeraVe. Tin vào tên đơn thay vì đọc `items` là một lỗi dễ mắc — và im lặng.
+
+Hình dạng chung của gói tin, viết gọn lại để nhớ:
+
+```json
+{ "order_ref": "<mã đơn>",
+  "items": [ { "product_id": "<SKU>", "qty": <số lượng>, "unit_price": <giá 1 đơn vị> }, … ] }
 ```
 
 miniAI **không tính toán gì** ở bước này: kiểm định dạng → tra API key để biết là shop nào → cất nguyên văn →
-trả lời ngay. Chú ý *"lẻ tẻ"* hiện ra rất rõ: 5 cái lúc 10 giờ, rồi 1-1-1 rải rác trưa. Không nhịp nào cả.
+trả lời ngay. Chú ý *"lẻ tẻ"* hiện ra rất rõ: 5 chai lúc 10 giờ, rồi 1-1-1 rải rác trưa. Không nhịp nào cả.
 
 > **Vì sao cửa vào không được phép tính toán?** Vì nó phải chịu được lúc đông khách nhất. Nếu mỗi lần bán hàng
 > mà hệ thống dừng lại dự báo thì giờ cao điểm sẽ nghẽn ngay tại quầy thu ngân. Nguyên tắc: **cửa vào phải nhẹ**.
@@ -179,7 +213,7 @@ Trả về trong vài chục mili-giây. Anh ta nhìn `p90 = 3,444` cho ngày ma
 
 | | Tầng 1 | Tầng 2 | Tầng 3 | Tầng 4 |
 |---|---|---|---|---|
-| Cùng một thông tin, ở dạng | 4 lượt mua rời | 1 dòng/ngày | 1 dòng/ngày-tương-lai | câu trả lời |
+| Cùng một thông tin, ở dạng | 4 đơn hàng rời (4 khách) | 1 dòng/ngày | 1 dòng/ngày-tương-lai | câu trả lời |
 | Con số | 5 · 1 · 1 · 1 | `units_sold = 8` | `p50 = 1,503` | "nhập 4 chai" |
 | Ai làm | cửa hàng bắn vào | job `rollup` | job `forecast_run` | API khi có người hỏi |
 | Khi nào | tức thì | mỗi 1 giờ | mỗi 1 ngày | lúc được gọi |
