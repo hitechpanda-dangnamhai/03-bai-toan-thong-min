@@ -262,6 +262,276 @@ không ghi vị trí thì không khử được thiên lệch vị trí, và mô
 `decision.feedback` là loại đặc biệt: mọi loại khác kể chuyện **cửa hàng**, riêng nó kể chuyện **về chính
 miniAI** — máy khuyên gì và người có nghe không. Không có nó thì hệ không bao giờ biết mình khuyên đúng hay sai.
 
+#### 13 khuôn mẫu ĐẦY ĐỦ — mỗi loại một tình huống thật
+
+Bảng ở trên nói *có những trường gì*. Phần này cho thấy **thật sự gửi đi trông ra sao** — đủ cả hai lớp, đúng
+thứ shop bắn lên. **12/13 khuôn dưới đây là dòng nguyên trạng lấy từ DB** (`raw_events` của 3 service, đọc lúc
+03:40 ngày 2026-08-10); riêng loại cuối chưa từng có dòng nào nên được đánh dấu rõ là **khuôn mẫu**.
+
+Nhắc lại lớp ngoài để khỏi phải lật lại: mọi khuôn đều bọc trong `{"events": [ … ]}`, và mọi phong bì đều có
+`event_id` · `event_type` · `event_time` · `user_pseudo_id` (+ `schema_version` mặc định `"1.0"`).
+
+---
+
+##### Nhóm 1 — HÀNH VI NGƯỜI DÙNG
+
+**1. `product.viewed`** — *"có người mở xem trang nước tẩy trang Garnier"*
+
+```json
+{ "events": [ {
+  "event_id": "ds8-ld-taytrang-garnier-2026-04-08-v11",
+  "event_type": "product.viewed",
+  "event_time": "2026-04-08T08:09:07+00:00",
+  "user_pseudo_id": "u691",
+  "schema_version": "1.0",
+  "payload": { "product_id": "ld-taytrang-garnier" }
+} ] }
+```
+Ruột đơn giản nhất trong 13 loại: đúng một trường. Xem là tín hiệu **yếu nhất** — nhiều lượt xem mà không ai
+mua là dấu hiệu tiêu đề hấp dẫn nhưng hàng không hợp.
+
+**2. `product.clicked`** — *"người ta bấm vào CeraVe ở vị trí 10 của khối gợi ý"*
+
+```json
+{ "events": [ {
+  "event_id": "ds8-ld-srm-cerave-2026-04-08-c1",
+  "event_type": "product.clicked",
+  "event_time": "2026-04-08T08:10:55+00:00",
+  "user_pseudo_id": "u140",
+  "schema_version": "1.0",
+  "payload": { "product_id": "ld-srm-cerave", "position": 10, "source": "reco" }
+} ] }
+```
+`position: 10` và `source: "reco"` là hai trường **đắt giá nhất** ở đây: bấm được ở tận vị trí 10 nghĩa là món
+đó thực sự hấp dẫn (người ta phải cuộn xuống mới thấy). Thiếu `position` thì mô hình học nhầm *"cái gì tôi để
+lên đầu thì cái đó tốt"*. `source` chỉ nhận `"search"` hoặc `"reco"` — để chấm điểm hai cỗ máy riêng biệt.
+
+**3. `cart.added`** — *"bỏ 1 chai Garnier vào giỏ"*
+
+```json
+{ "events": [ {
+  "event_id": "ds8-ld-taytrang-garnier-2026-04-08-k1",
+  "event_type": "cart.added",
+  "event_time": "2026-04-08T08:16:11+00:00",
+  "user_pseudo_id": "u463",
+  "schema_version": "1.0",
+  "payload": { "product_id": "ld-taytrang-garnier", "qty": 1.0 }
+} ] }
+```
+Ý định mạnh hơn click nhưng **chưa phải doanh thu** — bỏ giỏ rồi rời đi là chuyện thường. Vì thế `cart.added`
+nuôi gợi ý (BT01) nhưng **không** được tính là cầu (BT03 không nhận loại này).
+
+**4. `review.submitted`** — *"khách chấm 4,5 sao cho ốp lưng iPhone 15"*
+
+```json
+{ "events": [ {
+  "event_id": "ds8-dt-oplung-ip15-2026-04-08-rev11",
+  "event_type": "review.submitted",
+  "event_time": "2026-04-08T15:31:21+00:00",
+  "user_pseudo_id": "u189",
+  "schema_version": "1.0",
+  "payload": {
+    "product_id": "dt-oplung-ip15",
+    "rating": 4.5,
+    "review_id": "rv-dt-oplung-ip15-11",
+    "review_text": "Chất lượng tuyệt vời, gia đình rất thích."
+  }
+} ] }
+```
+`rating` bắt buộc và bị kẹp trong `[1 ; 5]` — gửi 0 sao hay 6 sao là bị từ chối. `review_text` tuỳ chọn, tối đa
+2000 ký tự.
+
+---
+
+##### Nhóm 2 — GIAO DỊCH
+
+**5. `purchase.completed`** — đơn 11:29 đã mổ ở trên; đây là bản đầy đủ, để ngay đây cho tiện đối chiếu
+
+```json
+{ "events": [ {
+  "event_id": "ds8-ld-taytrang-garnier-2026-05-31-buy",
+  "event_type": "purchase.completed",
+  "event_time": "2026-05-31T11:29:24+00:00",
+  "user_pseudo_id": "u124",
+  "schema_version": "1.0",
+  "payload": {
+    "order_ref": "ds-ord-ld-taytrang-garnier-2026-05-31",
+    "items": [
+      { "product_id": "ld-taytrang-garnier", "qty": 4, "unit_price": 156000 },
+      { "product_id": "ld-kcn-anessa",       "qty": 1, "unit_price": 553000 },
+      { "product_id": "ld-srm-cerave",       "qty": 1, "unit_price": 355000 }
+    ]
+  }
+} ] }
+```
+
+**6. `order.returned`** — *"khách trả 2 sản phẩm, có ghi lý do"*
+
+```json
+{ "events": [ {
+  "event_id": "hoc-ev-return-001",
+  "event_type": "order.returned",
+  "event_time": "2026-08-06T07:38:56+00:00",
+  "user_pseudo_id": "hoc-user-1",
+  "schema_version": "1.0",
+  "payload": {
+    "order_ref": "hoc-order-001",
+    "items": [ { "product_id": "hoc-sp-01", "qty": 2, "unit_price": 250000 } ],
+    "reason": "don tap huan - trung hoa du lieu training truoc demo"
+  }
+} ] }
+```
+Cùng hình dạng `items` như đơn mua — cố ý, để tái dùng đúng một bộ kiểm. `reason` tuỳ chọn (≤256 ký tự).
+Nhớ luật ở mục D: hàng trả trừ vào **ngày trả**, không phải ngày mua.
+
+---
+
+##### Nhóm 3 — TRẠNG THÁI HÀNG HOÁ
+
+**7. `stock.out`** — *"áo thun nữ form rộng hết hàng"*
+
+```json
+{ "events": [ {
+  "event_id": "ds8-tt-aothun-nu-form-2026-04-13-so",
+  "event_type": "stock.out",
+  "event_time": "2026-04-13T15:40:14+00:00",
+  "user_pseudo_id": "u321",
+  "schema_version": "1.0",
+  "payload": { "product_id": "tt-aothun-nu-form" }
+} ] }
+```
+Ruột chỉ một trường, nhưng đây là loại **có ảnh hưởng lớn nhất trên mỗi byte**: nó bật cờ `stockout` để BT03
+biết con số bán ra hôm đó **bị tồn kho che**, và cho BT01 hạ món hàng xuống khỏi kết quả.
+
+**8. `stock.level`** — *"còn 10 cái trong kho"*
+
+```json
+{ "events": [ {
+  "event_id": "fb17ad506ef944a5",
+  "event_type": "stock.level",
+  "event_time": "2026-08-01T10:00:00+00:00",
+  "user_pseudo_id": "u_test",
+  "schema_version": "1.0",
+  "payload": { "product_id": "sku-1", "on_hand_qty": 10 }
+} ] }
+```
+Khác `stock.out` ở chỗ nó nói **còn bao nhiêu** chứ không chỉ *"hết rồi"*. BT01 coi `on_hand_qty ≤ 0` cũng là
+hết hàng. **BT03 không nhận loại này** — dự báo cầu không được phép nhìn tồn kho, nếu không sẽ học thành dự
+báo *doanh số* (thứ đã bị tồn kho chặn) thay vì dự báo *cầu*.
+
+**9. `price.changed`** — *"iPhone 15 128GB đổi giá niêm yết"*
+
+```json
+{ "events": [ {
+  "event_id": "ds8-dt-iphone15-128-2026-04-08-price0",
+  "event_type": "price.changed",
+  "event_time": "2026-04-08T00:01:00+00:00",
+  "user_pseudo_id": "seed",
+  "schema_version": "1.0",
+  "payload": { "product_id": "dt-iphone15-128", "new_price": 16348000 }
+} ] }
+```
+`16348000` = 16.348.000đ, kiểu **`int`**, không dấu chấm không đơn vị. `old_price` tuỳ chọn (dòng thật này
+không có). Chú ý `user_pseudo_id: "seed"` — trường này bắt buộc, nên **việc do hệ thống làm** vẫn phải khai
+một danh tính; ở đây quy ước là `"seed"`.
+
+**10. `cost.recorded`** — *"nhập 10 cái, giá vốn 100đ/cái"*
+
+```json
+{ "events": [ {
+  "event_id": "evt_cost_0_3f52f2",
+  "event_type": "cost.recorded",
+  "event_time": "2026-08-01T00:00:00+00:00",
+  "user_pseudo_id": "u_test",
+  "schema_version": "1.0",
+  "payload": { "product_id": "prod_903f1abb", "unit_cost": 100, "qty": 10 }
+} ] }
+```
+Đây là loại **BT02 sống chết phải có**: không biết vốn thì không biết lãi, và chốt chặn *bán-dưới-vốn* không
+có gì để so. `supplier_ref` tuỳ chọn. **BT03 không nhận** — dự báo cầu không quan tâm mua vào bao nhiêu.
+
+---
+
+##### Nhóm 4 — THƯƠNG MẠI & VÒNG PHẢN HỒI
+
+**11. `promo.scheduled`** — *"phấn nước Clio giảm 21% từ 11/04 đến hết 15/04"*
+
+```json
+{ "events": [ {
+  "event_id": "ds8-ld-phannuoc-clio-2026-04-11-promo",
+  "event_type": "promo.scheduled",
+  "event_time": "2026-04-11T00:05:00+00:00",
+  "user_pseudo_id": "seed",
+  "schema_version": "1.0",
+  "payload": {
+    "product_ids": ["ld-phannuoc-clio"],
+    "discount_pct": 21.0,
+    "start": "2026-04-11T00:00:00Z",
+    "end":   "2026-04-15T23:59:59Z"
+  }
+} ] }
+```
+**Loại duy nhất mang một KHOẢNG thời gian.** Ba khác biệt so với mọi loại còn lại: (a) `product_ids` là **mảng**
+— một đợt sale áp cho nhiều SKU; (b) có `start`/`end`, và `end` **phải** sau `start`; (c) `event_time` (lúc
+*khai báo*) khác hoàn toàn `start` (lúc *có hiệu lực*). Rollup phải "tô" `discount_pct` ra **từng ngày** trong
+khoảng — ở đây là 5 ngày 11→15/04. Nhiều đợt chồng nhau thì lấy **giảm sâu nhất**.
+
+**12. `competitor.price`** — *"đối thủ trên Shopee bán 170.000đ"*
+
+```json
+{ "events": [ {
+  "event_id": "cp-comp-1",
+  "event_type": "competitor.price",
+  "event_time": "2026-08-04T09:00:00+00:00",
+  "user_pseudo_id": "probe",
+  "schema_version": "1.0",
+  "payload": {
+    "product_id": "cp-sku-1",
+    "competitor_price": 170000,
+    "competitor_ref": "shopee-probe"
+  }
+} ] }
+```
+`competitor_ref` tuỳ chọn nhưng nên có — để biết giá đó của sàn nào. `user_pseudo_id: "probe"` lại là một
+"danh tính máy": dữ liệu này do robot dò giá sinh ra, không phải người dùng.
+
+**13. `decision.feedback`** — *"người mua hàng ĐỒNG Ý với khuyến nghị của máy"*
+
+> ⚠ **Khuôn mẫu, KHÔNG phải dòng thật.** Đây là loại **duy nhất trong 13 chưa có dòng nào** trong cả ba DB
+> (đếm lúc 03:40 ngày 10/08 = 0). Không phải hệ thiếu chức năng — vòng phản hồi đã nối, nhưng cần quyết định
+> đủ 30 ngày tuổi mới có dòng hợp lệ đầu tiên (nợ có tên trong DB: `T-OUTCOME-30D`, dự kiến ~09/2026).
+> Vì chưa có số thật nên khuôn dưới đây dựng **theo đúng hợp đồng** `DecisionFeedbackPayload`, không phải đo được.
+
+```json
+{ "events": [ {
+  "event_id": "<mã do người gửi đặt, tất định>",
+  "event_type": "decision.feedback",
+  "event_time": "2026-08-10T09:00:00+00:00",
+  "user_pseudo_id": "buyer-01",
+  "schema_version": "1.0",
+  "payload": {
+    "decision_id": "<id của khuyến nghị mà máy đã đưa ra>",
+    "action": "accepted",
+    "outcome_note": "nhap 5 thung theo goi y, het hang truoc cuoi tuan"
+  }
+} ] }
+```
+`action` là enum đóng, chỉ `"accepted"` hoặc `"dismissed"`. Đây là loại **kể chuyện về chính miniAI**: máy
+khuyên gì và người có nghe không. Không có nó thì hệ không bao giờ tự biết mình khuyên đúng hay sai.
+
+---
+
+##### Ba nhận xét khi nhìn cả 13 khuôn cạnh nhau
+
+1. **Phong bì luôn giống hệt nhau, chỉ ruột đổi.** Đó là lý do một cửa `POST /v1/events:ingest` phục vụ được
+   cả 13 loại và cả 3 bài toán — thêm loại thứ 14 chỉ cần thêm một model ruột, không đụng gì tới cửa.
+2. **`user_pseudo_id` bắt buộc kể cả khi không có người thật.** Việc do máy làm vẫn phải khai danh tính —
+   dữ liệu thật dùng `"seed"` (dữ liệu dựng sẵn), `"probe"` (robot dò giá), `"u_test"` (bộ kiểm). Trường này
+   luôn trả lời được câu *"ai gây ra dòng này?"*.
+3. **Trường bắt buộc rất ít, trường tuỳ chọn khá nhiều.** Chủ ý: hạ rào cho khách tích hợp — bắn được cái tối
+   thiểu là đã dùng được ngay, `session_id` · `review_text` · `old_price` · `supplier_ref` · `competitor_ref`
+   bổ sung sau mà không phá dữ liệu cũ.
+
 #### Ba điều rút ra từ bảng 13 loại
 
 1. **`unit_price` · `new_price` · `unit_cost` · `competitor_price` đều khai kiểu `int`** ngay tại hợp đồng —
