@@ -39,28 +39,200 @@ Ba cụm từ trong câu này được mổ kỹ ở phần **HỎI & ĐÁP** ph
 
 ## 0.2 · BỐN TẦNG — ĐỌC THEO CHIỀU DỮ LIỆU CHẢY
 
+### Trước hết: "tầng" ở đây nghĩa là gì?
+
+Bốn tầng **không phải bốn phần mềm**, cũng không phải bốn máy chủ. Chúng là **bốn trạng thái mà cùng một
+thông tin đi qua**, mỗi trạng thái nằm ở một chỗ khác nhau và do một người khác nhau tạo ra:
+
+| Tầng | Thông tin ở dạng gì | Nằm ở đâu | Ai tạo ra |
+|---|---|---|---|
+| 1 — THU | *sự việc lẻ* ("lúc 07:15 có người mua 2 hộp") | bảng `raw_events` | cửa hàng bắn vào qua API |
+| 2 — CHUẨN BỊ | *chuỗi theo ngày* ("ngày 09/08 bán 6 hộp") | bảng `demand_daily` | job `rollup` chạy mỗi giờ |
+| 3 — GHI | *dự báo đã chốt* ("11/08 nhiều khả năng bán 2 hộp") | bảng `forecasts` | job `forecast_run` chạy mỗi ngày |
+| 4 — ĐỌC | *câu trả lời cho người dùng* ("nhập 5 hộp là đủ") | không lưu — sinh lúc gọi | API khi có người hỏi |
+
+Nói ngắn: **tầng 1 là cái đã xảy ra · tầng 2 là cái đã xảy ra được sắp gọn · tầng 3 là cái sắp xảy ra ·
+tầng 4 là cái nên làm.**
+
+### Đi theo MỘT sự việc có thật, từ đầu đến cuối
+
+Toàn bộ ví dụ dưới đây là **dữ liệu thật lấy ra từ DB lúc 03:10 ngày 2026-08-10**, không phải số bịa để minh
+hoạ. SKU: **`ld-srm-cerave`** (sữa rửa mặt CeraVe) của shop `demoshop`. Anh gõ lại lệnh nào cũng ra đúng số đó.
+
+---
+
+#### TẦNG 1 — ngày 31/05, bốn lượt mua rời rạc
+
+Bốn khách khác nhau mua trong ngày. Máy bán hàng bắn bốn gói tin, mỗi gói một dòng trong `raw_events`:
+
+| Giờ | qty | unit_price |
+|---|---|---|
+| 10:04:41 | 5 | 355.000 |
+| 11:29:24 | 1 | 355.000 |
+| 11:41:42 | 1 | 355.000 |
+| 12:59:13 | 1 | 355.000 |
+
+Hình dạng thật của một gói tin (đọc từ cột `payload`):
+
+```json
+{ "items": [ { "product_id": "ld-srm-cerave", "qty": 5, "unit_price": 355000 } ],
+  "order_ref": "..." }
+```
+
+miniAI **không tính toán gì** ở bước này: kiểm định dạng → tra API key để biết là shop nào → cất nguyên văn →
+trả lời ngay. Chú ý *"lẻ tẻ"* hiện ra rất rõ: 5 cái lúc 10 giờ, rồi 1-1-1 rải rác trưa. Không nhịp nào cả.
+
+> **Vì sao cửa vào không được phép tính toán?** Vì nó phải chịu được lúc đông khách nhất. Nếu mỗi lần bán hàng
+> mà hệ thống dừng lại dự báo thì giờ cao điểm sẽ nghẽn ngay tại quầy thu ngân. Nguyên tắc: **cửa vào phải nhẹ**.
+
+---
+
+#### TẦNG 2 — đầu giờ kế tiếp, "người thư ký" gom sổ
+
+Cứ mỗi 3.600 giây, job `rollup` thức dậy và **cuộn** mọi sự việc thành **một dòng cho mỗi SKU mỗi ngày**.
+Dòng thật trong `demand_daily`:
+
+```
+project_id = demoshop · product_id = ld-srm-cerave · day = 2026-05-31
+units_sold     = 8          ← 5 + 1 + 1 + 1
+price          = 355000     ← bình quân gia quyền theo số lượng
+stockout       = false
+promo_pct      = 0
+adjusted_units = 8          ← bằng units_sold vì ngày đó không hết hàng
+```
+
+Bốn dòng lẻ ở tầng 1 biến thành **một** dòng ở tầng 2. Ba việc quan trọng chỉ xảy ra ở tầng này:
+
+1. **Đổi đơn vị**: từ *giây* sang *ngày*. Model làm việc theo ngày.
+2. **Điền chỗ trống**: ngày không ai mua vẫn đẻ ra một dòng `units_sold = 0`. Vắng mặt là **con số thật**,
+   không phải thiếu dữ liệu.
+3. **Bù cái bị che**: ngày hết hàng, con số bán ra *không phải* nhu cầu thật.
+
+Ví dụ thật cho việc thứ 3 — SKU khác, `tt-aothun-coolmate`, ngày 2026-08-05:
+
+| 7 ngày trước | 29/07 | 30/07 | 31/07 | 01/08 | 02/08 | 03/08 | 04/08 |
+|---|---|---|---|---|---|---|---|
+| `adjusted_units` | 1 | 1 | 1 | 5 | 10 | 2 | 4 |
+
+```
+trung bình 7 ngày = (1+1+1+5+10+2+4) / 7 = 24 / 7 = 3,428571…
+
+ngày 05/08: units_sold = 0 nhưng stockout = true
+  ⇒ adjusted_units = max(0 ; 3,428571…) = 3,428571…      ← đúng bằng số trong DB
+```
+
+Bán 0 vì **hết hàng**, không phải vì hết người mua. Nếu để 0 chảy vào model thì nó học nhầm "cầu đang giảm"
+→ dự báo thấp → nhập ít → hết hàng sớm hơn nữa. **Cột `adjusted_units` mới là cột model đọc**, không phải
+`units_sold`.
+
+Số đo thật một lượt rollup (2026-08-10, toàn bộ 8 tenant): **2 giây** cho 1.160 SKU / 49.640 ngày-SKU.
+
+---
+
+#### TẦNG 3 — nửa đêm, hệ tự ngồi tính dự báo
+
+Mỗi 86.400 giây, job `forecast_run` chạy: học hệ số khuyến mãi của shop → gỡ ảnh hưởng sale ra khỏi lịch sử →
+phân loại SKU bán đều hay bán lai rai → chọn model → hiệu chỉnh khoảng. Kết quả **ghi xuống bảng `forecasts`**,
+mỗi ngày tương lai một dòng. Ba dòng đầu của mẻ `r_2026-08-10` cho chính SKU trên:
+
+| `horizon_day` | p10 | p50 | p90 | `model_used` |
+|---|---|---|---|---|
+| 2026-08-11 | 0,531 | 1,503 | 3,444 | `autoets_theta_ensemble` |
+| 2026-08-12 | 0,503 | 1,426 | 3,367 | `autoets_theta_ensemble` |
+| 2026-08-13 | 0,476 | 1,348 | 3,289 | `autoets_theta_ensemble` |
+
+kèm `data_window = 2026-04-08..2026-08-10` (124 ngày đã học) và
+`calibration = {"width_factor": 0.647, "empirical_coverage": 0.952}`.
+
+Đọc dòng đầu thành lời: *"Ngày 11/08, CeraVe nhiều khả năng bán 1,5 chai; kịch bản ế còn ~0,5 chai; muốn
+90% chắc chắn không thiếu thì chuẩn bị ~3,4 chai."*
+
+Hai điều đáng để ý ngay trong bảng này:
+
+- **Số lẻ (1,503 chai) là bình thường, không phải lỗi.** Đây là *kỳ vọng* của một biến ngẫu nhiên, giống
+  câu "trung bình mỗi hộ có 1,8 con". Người mua hàng làm tròn ở bước cuối, không phải hệ làm tròn ở bước này.
+- **Càng xa càng thấp dần** (1,503 → 1,426 → 1,348): model đang kéo dự báo về mức nền dài hạn, vì càng xa thì
+  thông tin của những ngày gần đây càng ít giá trị.
+
+Và `empirical_coverage = 0,952` nghĩa là khoảng `[p10,p90]` **đo được** bao 95,2% giá trị thật trong khi nó chỉ
+**hứa** 80% ⇒ khoảng quá rộng ⇒ hệ tự nén lại còn 64,7% bề rộng (`width_factor`). Xem mục G.
+
+Số đo thật một lượt: **334 giây** cho 1.793 SKU, ghi 50.204 dòng dự báo.
+
+---
+
+#### TẦNG 4 — 8 giờ sáng, người mua hàng mở máy
+
+Bây giờ mới có người hỏi. Anh ta gọi `POST /v1/forecast:query` cho SKU này, 14 ngày tới.
+
+Hệ **không tính lại gì cả**. Nó đọc 14 dòng đã có sẵn trong `forecasts`, rồi làm ba việc nhẹ:
+
+- nhân **hệ số lịch** (sắp Tết thì đội lên, mùng 1-2 Tết thì sụt);
+- **cộng dồn** nếu người ta hỏi tổng 14 ngày (không phải cộng thẳng p90 — xem mục H);
+- **hoà giải cấp bậc** nếu người ta hỏi cả ngành hàng.
+
+Trả về trong vài chục mili-giây. Anh ta nhìn `p90 = 3,444` cho ngày mai, làm tròn lên, **nhập 4 chai**.
+
+---
+
+#### Tóm cả hành trình trong một bảng
+
+| | Tầng 1 | Tầng 2 | Tầng 3 | Tầng 4 |
+|---|---|---|---|---|
+| Cùng một thông tin, ở dạng | 4 lượt mua rời | 1 dòng/ngày | 1 dòng/ngày-tương-lai | câu trả lời |
+| Con số | 5 · 1 · 1 · 1 | `units_sold = 8` | `p50 = 1,503` | "nhập 4 chai" |
+| Ai làm | cửa hàng bắn vào | job `rollup` | job `forecast_run` | API khi có người hỏi |
+| Khi nào | tức thì | mỗi 1 giờ | mỗi 1 ngày | lúc được gọi |
+| Lưu ở đâu | `raw_events` | `demand_daily` | `forecasts` | không lưu |
+
+### Vì sao phải chia bốn tầng — sao không tính thẳng lúc có người hỏi?
+
+Đây là câu hỏi đúng, và có bốn câu trả lời, mỗi câu là một tính chất kỹ thuật thật:
+
+| Nếu gộp lại tính lúc hỏi | Hậu quả |
+|---|---|
+| Cửa vào vừa nhận event vừa dự báo | Giờ cao điểm bán hàng = giờ hệ nghẽn. Việc **nặng** và việc **gấp** dẫm chân nhau |
+| API đọc chạy model | Mỗi lần bấm F5 ra một con số khác (model có yếu tố ngẫu nhiên) ⇒ khách mất niềm tin ngay |
+| Không lưu `forecasts` | Không trả lời được *"hôm qua anh khuyên tôi nhập bao nhiêu?"* — không có gì để đối chiếu khi sai |
+| Không lưu `demand_daily` | Mỗi lần dự báo phải quét lại hàng triệu event thô ⇒ chậm gấp hàng trăm lần, và không ai bù được ngày hết hàng |
+
+Cách chia này có một tên gọi chung trong ngành: **tách đường ghi khỏi đường đọc**. Đường ghi (tầng 1-3) làm
+việc nặng theo lịch, âm thầm. Đường đọc (tầng 4) chỉ lấy kết quả đã có, nên luôn nhanh và luôn ra cùng một số.
+
+### Bất biến phải nhớ
+
+> **Tầng 3 là kết quả ĐÃ ĐÔNG LẠNH của một `run_id`. Tầng 4 KHÔNG chạy lại model.**
+
+Hai hệ quả đi kèm — một tốt, một phải chấp nhận:
+
+- **Tốt:** API đọc nhanh và **tất định** — hỏi 10 lần ra 10 lần giống nhau; và vì mỗi dòng mang theo
+  `run_id`, `model_used`, `data_window`, `calibration`, ta luôn truy được *"con số này sinh lúc nào, bằng
+  model gì, học trên khoảng dữ liệu nào"*. Sai thì mổ xẻ được, không phải cãi nhau bằng trí nhớ.
+- **Phải chấp nhận:** số **cũ nhất bằng lần chạy job gần nhất**. Vừa nạp một đống dữ liệu mới xong mà gọi
+  API ngay thì vẫn nhận số của mẻ cũ. Muốn số mới **phải chạy job**, gọi lại API bao nhiêu lần cũng vô ích.
+  (Đây chính là lý do có `POST /v1/forecast:run` — nút bấm để ép chạy mẻ mới cho một shop.)
+
+### Bản đồ rút gọn để nhớ
+
 ```
 TẦNG 1 — THU        raw_events        ← POST /v1/events:ingest
    purchase.completed · order.returned · stock.out · price.changed · promo.scheduled
         │
-        │  jobs/rollup.py :: run_rollup_once
+        │  jobs/rollup.py :: run_rollup_once          (mỗi 1 giờ)
         ▼
 TẦNG 2 — CHUẨN BỊ   demand_daily(project_id, product_id, day,
                                  units_sold, stockout, price, promo_pct, adjusted_units)
         │
-        │  jobs/forecast_run.py   học k → deflate promo → phân loại → chọn model → hiệu chỉnh
+        │  jobs/forecast_run.py                       (mỗi 1 ngày)
+        │  học k → deflate promo → phân loại → chọn model → hiệu chỉnh
         ▼
 TẦNG 3 — GHI        forecasts(project_id, product_id, run_id, horizon_day,
                               p10, p50, p90, model_used, data_window, calibration)
         │
-        ▼
+        ▼   (không chạy model — chỉ đọc + biến đổi nhẹ)
 TẦNG 4 — ĐỌC        main.py: forecast:query · aggregate · promo-preview · insights · scenarios:*
                     (+ apply_calendar, + tổng hợp horizon, + reconcile)
 ```
-
-**BẤT BIẾN CỦA BẢN ĐỒ.** Tầng 3 là **kết quả đã đông lạnh của một `run_id`**. Tầng 4 **không** chạy lại model — chỉ đọc bảng rồi biến đổi nhẹ (nhân hệ số lịch, cộng dồn theo horizon, hoà giải cấp bậc).
-
-Hệ quả vận hành: API đọc nhanh và tất định; muốn số mới thì phải chạy job, không phải gọi lại API.
 
 ---
 
@@ -629,6 +801,35 @@ Nó tệ hơn "bất tiện lúc demo": mỗi lần **deploy** là tự nã CPU 
 - Đọc lỗi thì **fail-open** (chạy) — hành vi degrade đúng bằng hành vi cũ, không bao giờ làm dữ liệu cũ đi.
 - Kill-switch `FORECAST_JOB_SCHEDULE_ANCHOR=0` trả về hành vi cũ mà không cần build lại.
 - Marker của loop (`<job>_loop`) **tách khỏi** dòng `job_runs` của job sản phẩm, vì `forecast_run`/`backtest_run` cũng được ghi bởi lần chạy **một tenant** từ API — một tenant xong không được phép thoả mãn lịch của loop phủ mọi tenant.
+
+### ĐÃ SỬA VÀ ĐÃ ĐO — 2026-08-10
+
+Fix đã land trong `services/forecast/app/jobs/schedule.py` (+ 3 loop chuyển sang `run_scheduled_loop`).
+
+**Lần boot ĐẦU sau khi deploy** (chưa có marker nào ⇒ đúng thiết kế: "chưa từng chạy thì chạy") —
+đây cũng là lần đầu tiên `job_runs` ghi được **thời lượng thật** thay vì 0 giây:
+
+| Job | Thời lượng thật | Khối lượng |
+|---|---|---|
+| `rollup_loop` | **2 s** | 1.160 SKU / 49.640 ngày-SKU |
+| `forecast_run_loop` | **334 s** (5,6 phút) | 1.793 SKU → 50.204 dòng dự báo |
+| `backtest_run_loop` | **593 s** (9,9 phút) | 1.146 SKU → 4.448 dòng |
+
+Ba job chạy song song ⇒ wall-clock boot đầu = 01:41:24 → 01:51:21 = **9 phút 57 giây**.
+Đây chính là con số "vài chục phút" mà trước nay **không ai đo được**, vì mọi dòng `job_runs` đều khai 0 giây.
+
+**Lần restart THỨ HAI** (marker còn tươi) — phép đo quyết định:
+
+| | Trước fix | Sau fix (đo 01:56–01:59) |
+|---|---|---|
+| Restart khi chưa tới hạn | chạy lại full, CPU 782–1294% | **không chạy gì**, CPU **0,24–0,52%** |
+| Số marker `*_loop` sau restart | — | vẫn **3**, không sinh thêm dòng nào |
+| Thời gian tới `healthz` 200 | vài chục phút mới hết tải | **14 giây** |
+
+Kiểm chứng bằng test: 13/13 xanh trong `tests/forecast/test_job_schedule.py`, gồm **một test tự-phá**
+(`test_skip_is_caused_by_the_gate_not_by_luck`): cùng marker tươi đó, tắt cổng bằng
+`FORECAST_JOB_SCHEDULE_ANCHOR=0` thì job **có** chạy — chứng minh việc bỏ qua là do cổng, không phải do may.
+Suite forecast: 264 pass / 0 fail.
 
 Nợ kèm theo, đã đặt tên `W-JOBRUNS-DURATION-ZERO`: `backtest_run.py` đặt `started_at` và `finished_at` **cùng lúc ở cuối job** ⇒ mọi dòng `job_runs` khai thời lượng ≈ 0; cộng với `except Exception: pass` ở cả ba loop, một job có thể **chết cả tuần mà không ai biết**.
 
