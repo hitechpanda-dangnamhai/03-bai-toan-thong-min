@@ -1,7 +1,7 @@
 # BÀI 3 — SỬ DỤNG API TRỌN CHUỖI: ĐÓNG VAI KHÁCH TÍCH HỢP (bản chuẩn v2 — sau buổi thực hành 2026-08-06)
 
 > Giáo trình training human. Bài 0 = bản đồ API · Bài 1 = vận hành · Bài 2 = cấu hình & key.
-> Điều kiện vào: stack xanh (Bài 1 B3c 42/42) + thuộc 2 header xác thực (Bài 2).
+> Điều kiện vào: stack xanh (Bài 1 B3c 43/43) + thuộc 2 header xác thực (Bài 2).
 > Mọi lệnh chạy từ `cd /home/hai-soft/projects/icpp/mecom/project` · tenant **demoshop**.
 > Bản v2 này đã hấp thụ TOÀN BỘ kết quả đo thật + bài học phát sinh của buổi thực hành đầu (human tự tay chạy).
 > ⚠ Lệnh nhiều dòng có dấu `\` cuối dòng — copy TRỌN KHỐI; dán thiếu `\` là `-H` rơi mất tham số (đã dính 1 lần).
@@ -275,8 +275,28 @@ Lời khuyên = cam kết có hồ sơ theo dõi, không phải chatbot phủi t
 curl -s -o /dev/null -w "xoa lan 1: %{http_code}\n" -X DELETE localhost:16021/v1/products/hoc-sp-01 -H "Authorization: Bearer $SKEY" -H "X-Project-Id: demoshop"; curl -s -o /dev/null -w "xoa lan 2: %{http_code}\n" -X DELETE localhost:16021/v1/products/hoc-sp-01 -H "Authorization: Bearer $SKEY" -H "X-Project-Id: demoshop"
 ```
 **Kỳ vọng:** lần 1 `204` (xóa xong, không cần body) · lần 2 `404` (nói thật "đã không còn", không giả vờ
-thành công) — đúng probe `products:delete 204+404` của nhà. Event `hoc-ev-*` Ở LẠI: event là lịch sử,
-không có API xóa — đúng thiết kế.
+thành công) — đúng probe `products:delete 204+404` của nhà.
+
+### 3.10b — VÌ SAO KHÔNG XÓA ĐƯỢC EVENT + cách dọn ĐÚNG (bút toán đảo — human chất vấn, bài học đắt)
+Event = **sổ cái kế toán**: không tẩy dòng, sai thì ghi dòng ĐẢO. 4 lý do immutable: (1) kiểm toán tiền/kho/
+thuế; (2) replay/watermark — projection cuộn theo ledger_position, rút dòng giữa = số hạ nguồn mồ côi;
+(3) dedup — xóa event = giải phóng event_id = mở cửa đếm trùng; (4) forecast/decision đã "ăn" event — chỉ
+sự kiện mới dạy lại được chúng.
+**Bút toán đảo cho từng loại:** đơn sai/dọn training → **`order.returned`** `{order_ref, items, reason}` (có
+trường reason để ghi lý do vào sổ!) · vốn sai → `cost.recorded` giá trị đúng (EWMA trôi theo) · giá sai →
+`price.changed` giá trị đúng (ghi đè current_price).
+```bash
+EVT=$(date -u +%Y-%m-%dT%H:%M:%SZ) && curl -s localhost:16023/v1/events:ingest -H "Authorization: Bearer $FKEY" \
+ -H "X-Project-Id: demoshop" -H "Content-Type: application/json" -d '{"events":[{"event_id":"hoc-ev-return-001",
+ "schema_version":"1.0","event_type":"order.returned","event_time":"'$EVT'","user_pseudo_id":"hoc-user-1",
+ "session_id":null,"attribution_token":null,"payload":{"order_ref":"hoc-order-001","items":[{"product_id":
+ "hoc-sp-01","qty":2,"unit_price":250000}],"reason":"don tap huan - trung hoa truoc demo"}}]}' | python3 -m json.tool
+# xac nhan trung hoa (cho nhip rollup ~5 phut):
+docker exec miniai-postgres psql -U miniai -d miniai_forecast -c "SELECT COALESCE(sum(adjusted_units),0) FROM demand_daily WHERE project_id='demoshop' AND product_id='hoc-sp-01';"   # ky vong 0
+```
+**Dọn sân TRỌN VẸN = xóa catalog (204/404) + trung hòa event bằng sự kiện đảo + đo lại (demand ròng=0 ·
+check-apis 43/43).** Chưa đo thấy 0 = chưa được tuyên xong. Bonus đo thật buổi học: event product.viewed
+của buổi tập làm chain `user_profile rows` chuyển SKIP→PASS count=1 — dữ liệu tập cũng nuôi hệ khôn lên.
 
 ---
 

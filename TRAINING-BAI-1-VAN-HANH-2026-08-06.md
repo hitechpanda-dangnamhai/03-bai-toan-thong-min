@@ -4,7 +4,7 @@
 > Nguồn sự thật = DB tri thức: `RB-DEMO-PREFLIGHT` (phòng) + `RB-HOST-OVERLOAD-COLDSTART` (chữa) — `python3 rail.py q "preflight"`.
 > Bài 0 (bản đồ 52 API) = `TRAINING-API-MAP-2026-08-06.md`.
 
-**Mục tiêu:** tự tay dựng hệ miniAI từ số 0, chứng minh nó sống bằng SỐ (42/42), và chẩn đoán được khi số đỏ.
+**Mục tiêu:** tự tay dựng hệ miniAI từ số 0, chứng minh nó sống bằng SỐ (43/43), và chẩn đoán được khi số đỏ.
 
 ---
 
@@ -49,6 +49,22 @@ docker ps -a --format 'table {{.Label "com.docker.compose.project"}}\t{{.Names}}
 ```
 - `-a` = gồm cả container đã tắt. Nhãn `com.docker.compose.project` = "container này của ai".
 - Đọc 3 câu: máy cõng project nào? · ai `Restarting` (cờ đỏ crash-loop)? · ai `Up` mà không phục vụ hôm nay?
+
+> ⛔ **QUẢ MÌN CỔNG 16024 (gặp thật 10/08 — đọc kỹ, đây là chỗ mất dữ liệu).**
+> Workspace `~/projects/icpp/start/` dựng container **`wfstart-mecom-pg` cắm ĐÚNG cổng 16024** để chạy test
+> cho mecom. Nó đang chạy ⇒ `miniai-postgres` **không lên được** (cổng bận), và ai `psql -p 16024` sẽ thấy
+> **0 dòng mọi bảng** rồi tưởng mất sạch dữ liệu — thực ra đang nhìn nhầm DB.
+>
+> **Xử lý ĐÚNG — chỉ một cách:**
+> ```bash
+> docker stop wfstart-mecom-pg     # rồi mới: docker compose up -d
+> ```
+> **TUYỆT ĐỐI KHÔNG dời cổng container test sang cổng khác.** File `start/workspaces/mecom/test.env`
+> hardcode `localhost:16024` và giữ cả **`MINIAI_TEST_ADMIN_DSN`** (DSN quyền admin). Dời cổng mà không sửa
+> được file đó ⇒ bộ test bên kia sẽ nối bằng quyền admin vào **DB THẬT của demo** và drop schema —
+> mất dữ liệu, im lặng, không báo lỗi.
+>
+> Nhận diện nhanh ai đang giữ cổng: `docker ps --format '{{.Names}}\t{{.Ports}}' | grep 16024`
 
 ### P2. Đo nền
 ```bash
@@ -138,16 +154,20 @@ Sau `down/up`, lần gọi `:run` đầu bắt buộc train model từ 0 → có
 until FC=$(docker stats --no-stream --format '{{.CPUPerc}}' miniai-forecast | cut -d. -f1); FW=$(docker stats --no-stream --format '{{.CPUPerc}}' miniai-forecast-worker | cut -d. -f1); [ "${FC:-99}" -lt 50 ] && [ "${FW:-99}" -lt 50 ]; do echo "forecast dang cay (svc=${FC}% wk=${FW}%)... cho 15s"; sleep 15; done; echo "== FORECAST NGHI — duoc phep do =="
 ```
 Đo trực tiếp CPU thay vì `sleep` đoán mò — cổng chỉ mở khi máy xong việc thật.
-🛠 **Sửa 06/08 tối (bản cũ SAI):** bản đầu chỉ canh `miniai-forecast-worker` — nhưng **backtest-on-boot chạy
-trong container SERVICE `miniai-forecast`** (vòng lặp nằm ở startup của API, main.py). Canh mỗi worker thì
-cổng mở oan giữa lúc service đang cày full backtest sau `docker compose up` từ máy nguội → đo ra FAIL oan.
-Quy tắc nhớ: **cứ thấy container `miniai-forecast` BOOT là backtest chạy** — up trên stack đang chạy thì không.
+🛠 **Sửa 06/08 tối:** bản đầu chỉ canh `miniai-forecast-worker` — nhưng job nền chạy **trong container
+SERVICE `miniai-forecast`** (vòng lặp bật ở startup của API, `main.py`), nên canh mỗi worker thì cổng mở oan
+giữa lúc service đang cày → đo ra FAIL oan. Vẫn canh **cả hai** container.
+
+🆕 **Cập nhật 10/08 — quy tắc cũ "cứ thấy `miniai-forecast` BOOT là backtest chạy" ĐÃ HẾT ĐÚNG.**
+Job nền nay neo lịch vào **trạng thái** (`W-JOB-SCHEDULE-STATE-ANCHOR`), không neo vào tiến trình: trước khi
+chạy, loop hỏi Postgres còn bao lâu tới hạn. Chưa tới hạn thì **ngủ tiếp, không làm gì**. Xem mục
+**B3d** để biết cách kiểm bằng 1 câu SQL thay vì đoán.
 
 ### B3c — PHÁN QUYẾT
 ```bash
 make check-apis PROJECT=demoshop
 ```
-Kỳ vọng: **API CHECK 42/42 PASS — mọi lần.** FAIL tại đây = sự cố thật 100%, xứng đáng chẩn đoán.
+Kỳ vọng: **API CHECK 43/43 PASS — mọi lần** (42/42 là con số của bản 06/08; probe `forecast:run` tách đôi khi lên 202+job_id). FAIL tại đây = sự cố thật 100%, xứng đáng chẩn đoán.
 
 **Rút gọn hợp lệ:** hệ đang chạy sẵn + lần đo gần nhất xanh (model ấm) → chạy thẳng B3c. Cứ dựng lại stack là đủ 3a→3b→3c.
 
@@ -159,9 +179,54 @@ Kỳ vọng: **API CHECK 42/42 PASS — mọi lần.** FAIL tại đây = sự c
 > stack (train nguội vẫn tốn phút — chỉ là không còn rơi vào mặt client). Thêm 2 vũ khí mới:
 > 1. **Preflight máy:** `python -m seedtool check` tự TỪ CHỐI đo khi máy nghẹt — exit `3` in
 >    `MOI-TRUONG-BAN: load1=... nproc=...` (khác 0=PASS, 1=FAIL nghiệp vụ). Hết cảnh 39/42 oan như sáng nay.
-> 2. **GOTCHA backtest-on-boot (đo thật 17h):** restart container forecast ⇒ `start_backtest_loop` chạy
+> 2. **GOTCHA backtest-on-boot (đo thật 17h/06-08):** restart container forecast ⇒ `start_backtest_loop` chạy
 >    FULL backtest mọi project ngay khi boot (CPU 90%+ có thể vài chục phút) — **ĐỪNG restart forecast ngay
 >    trước demo**; lỡ restart thì chờ bằng B3b (đo CPU <20-50%), không chờ bằng đồng hồ.
+>    ⛔ **MỤC 2 NÀY ĐÃ LỖI THỜI TỪ 2026-08-10 — xem B3d.** Bệnh đã vá; restart giờ an toàn.
+
+### B3d — Kiểm lịch job nền (thay cho quy tắc cũ) 🆕 10/08
+
+**Điều đã đổi.** Trước 10/08, cả 3 loop nền (`rollup` · `forecast_run` · `backtest`) viết theo khuôn *chạy ngay
+rồi mới ngủ*: điểm gốc của lịch là **lúc tiến trình sinh ra**. Container không nhớ quá khứ ⇒ mỗi restart/deploy/
+OOM-kill chạy lại full một job có chu kỳ 7 ngày. Nay lịch neo vào **marker trong bảng `job_runs`**: loop hỏi
+Postgres còn bao lâu tới hạn, chưa tới hạn thì ngủ tiếp.
+
+```bash
+# 1 câu SQL thay cho mọi phỏng đoán: lần chạy XONG GẦN NHẤT của từng loop + còn bao lâu tới hạn
+PGPASSWORD=miniai psql -h localhost -p 16024 -U miniai -d miniai_forecast -c \
+  "SELECT job_name, max(finished_at) lan_cuoi, now() - max(finished_at) cach_day
+   FROM job_runs WHERE job_name LIKE '%_loop' AND status='success'
+   GROUP BY job_name ORDER BY 1;"
+```
+
+Đọc kết quả — đối chiếu `cach_day` với chu kỳ của từng job (rollup 1 giờ · forecast_run 1 ngày · backtest 7 ngày):
+
+| Thấy gì | Nghĩa là |
+|---|---|
+| Đủ 3 dòng, `cach_day` **nhỏ hơn** chu kỳ | Lịch đang tươi ⇒ **restart không chạy lại gì** |
+| Đủ 3 dòng, `cach_day` **vượt** chu kỳ | Đã tới hạn ⇒ lần boot/tick tới job đó **sẽ chạy** (đúng, không phải lỗi) |
+| Thiếu dòng nào | Job đó **chưa từng chạy xong** trên image này ⇒ lần boot tới nó chạy **một lần** |
+| Muốn xem cả lịch sử | bỏ `GROUP BY`, dùng `ORDER BY finished_at` — mỗi lượt chạy là một dòng |
+
+**Cổng này KHÔNG chặn nhầm việc đến hạn** — đo thật cùng đêm: `rollup_loop` xong lúc `01:41:30`, tự chạy lại
+lúc `02:41:32`, **đúng 1 giờ sau**, không cần ai bấm gì.
+
+**Số đo thật 2026-08-10:**
+
+| Tình huống | Kết quả đo |
+|---|---|
+| Boot **đầu** sau khi deploy image mới (chưa có marker) | trả giá **một lần**: 9 phút 57 giây — rollup 2 s · forecast_run 334 s · backtest 593 s (chạy song song) |
+| **Restart** khi marker còn tươi | **0 job chạy**, CPU 0,24–0,52%, `healthz` 200 sau **14 giây** |
+| **Recreate** cả stack (container hoàn toàn mới) | **0 job chạy**, marker vẫn 3 dòng, `readyz` 3/3 sau **51 giây** |
+
+**Kiểm nhanh đang chạy image cũ hay mới:** nếu `SELECT round(extract(epoch from finished_at-started_at))
+FROM job_runs` trả **0 với mọi dòng** thì đó là image **cũ hơn 10/08** — bản cũ đóng dấu `started_at` và
+`finished_at` cùng một lúc ở cuối job nên mọi lượt chạy đều khai 0 giây.
+
+**Quy tắc mới, thay quy tắc cũ:**
+- Restart / recreate **an toàn** — cứ làm khi cần, kể cả gần giờ demo.
+- Chỉ dè chừng **lần boot đầu sau khi build image mới**: chờ đúng ~10 phút, hoặc chờ bằng B3b (đo CPU), rồi kiểm B3d thấy đủ 3 dòng.
+- Muốn quay về hành vi cũ (ép chạy mọi lần boot): đặt `FORECAST_JOB_SCHEDULE_ANCHOR=0`.
 
 ---
 
@@ -191,7 +256,7 @@ Manh mối vàng khi đọc:
 4. Phán quyết ở B3c; warm-up B3a không chấm điểm.
 5. Timeout: hỏi ngay "AI đang ăn CPU — người ngoài / nhà mình / không ai?" → 3 đường xử khác nhau.
 6. Tắt nhà người khác: đo trước, chủ nhà gật, chỉ `stop`, đủ `-f`, ghi lại để dựng lại.
-7. Lệnh thuộc lòng số 1: `make check-apis PROJECT=demoshop` — trước mọi demo, sau mọi restart. Không tin cảm giác, tin 42/42.
+7. Lệnh thuộc lòng số 1: `make check-apis PROJECT=demoshop` — trước mọi demo, sau mọi restart. Không tin cảm giác, tin 43/43.
 
 ## CÂU PHỎNG VẤN TỰ LUYỆN (dẫn số thật)
 1. Phân biệt healthz/readyz — hệ của bạn ai tiêu thụ từng mạch?

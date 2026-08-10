@@ -1,7 +1,7 @@
 # BÀI 2 — CẤU HÌNH & XÁC THỰC PER-TENANT: KEY → HEADER → CHÍNH SÁCH → VÒNG ĐỜI KEY
 
 > Giáo trình training human (xuất 2026-08-06). Bài 0 = `TRAINING-API-MAP-2026-08-06.md` · Bài 1 = `TRAINING-BAI-1-VAN-HANH-2026-08-06.md`.
-> Điều kiện vào bài: stack đang xanh (Bài 1 B3c = 42/42).
+> Điều kiện vào bài: stack đang xanh (Bài 1 B3c = 43/43).
 > Mọi lệnh chạy từ: `cd /home/hai-soft/projects/icpp/mecom/project`
 
 **Mục tiêu:** hiểu tenant/key/header; đọc-đổi chính sách kinh doanh qua API; nắm trọn vòng đời key (cấp → dùng → lộ → xoay → thu hồi) và cơ chế hash một chiều đứng sau nó.

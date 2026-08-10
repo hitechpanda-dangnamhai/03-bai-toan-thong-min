@@ -2,7 +2,9 @@
 
 > ⚠ File này là BẢN XUẤT ĐỂ ĐỌC (training human, demo đối tác). NGUỒN SỰ THẬT = DB tri thức
 > (`python3 rail.py q/graph` — kb_surface 58 · kb_feature 46 · kb_domain 3) + `project/openapi/*.json` (codegen từ code).
-> Số đo tại thời điểm xuất: check-apis **42/42 PASS, 0 SKIP** · QC V4 16/16 · 1.263 test per-service.
+> Số đo tại thời điểm xuất (06/08): check-apis **42/42 PASS, 0 SKIP** · QC V4 16/16 · 1.263 test per-service.
+> 🆕 Đo lại 2026-08-10: check-apis **43/43 PASS, 0 SKIP** (probe `forecast:run` tách đôi từ khi `:run` trả 202+job_id) ·
+> chain 5/7 PASS 2 SKIP 0 FAIL (2 SKIP do dữ liệu: không có promo đang chạy) · suite forecast 278 · decision 469 · smartsearch 269.
 
 ---
 
@@ -103,8 +105,8 @@ PHẢN HỒI:       click / purchase events ──► LTR dataset, user_profile 
 **3 service không rời rạc:**
 - forecast nuôi decision: `scenarios:lead-time-demand` → `decisions:replenish-plan`
 - search nuôi forecast + decision: event mua hàng đi chung 1 cửa ingest
-- mọi chuỗi có phép đo máy: `make check-apis PROJECT=demoshop` = 42 probe API + 6 chain probe
-  (rls-fuzz cách ly tenant · user_profile · elasticity · …) — đang **42/42 PASS, 0 SKIP**
+- mọi chuỗi có phép đo máy: `make check-apis PROJECT=demoshop` = 43 probe API + 7 chain probe
+  (rls-fuzz cách ly tenant · user_profile · elasticity · …) — đang **43/43 PASS, 0 SKIP**
 
 ---
 

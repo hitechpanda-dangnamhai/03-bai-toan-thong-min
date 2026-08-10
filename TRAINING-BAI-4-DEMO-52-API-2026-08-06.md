@@ -356,7 +356,7 @@ xác suất mà chủ shop hiểu được.
 ═══════════════════════════════════════════════
 1. Gỡ rule ghim: S14 (nếu chưa).  2. Xóa sản phẩm tập: S17 (204/404).
 3. Trung hòa đơn tập (nếu muốn số ròng sạch): bút toán đảo `order.returned` cho từng `b4-order-*` đã bơm
-   (xem Bài 3 mục 3.10b).  4. Gate chốt: `make check-apis PROJECT=demoshop` → 42/42.
+   (xem Bài 3 mục 3.10b).  4. Gate chốt: `make check-apis PROJECT=demoshop` → 43/43.
 
 ═══════════════════════════════════════════════
 # 🆕 MÀN DEMO 2-LINE — SP MỚI vs SP ĐẦY ĐỦ DATA (human đề xuất tối 06/08, số đo thật kèm dưới)
@@ -393,4 +393,4 @@ không-dấu (S6 demo được ngay)". Điểm yếu nói trước mặt luôn �
   `X-Internal-Token`.
 - Đọc = bắn thoải mái; [GHI] = để lại vết → dọn sân + trả nguyên trạng.
 - Mọi con số lạ trong response đều tra được: sổ (`demand_daily`, `cost_state`...) hoặc code (hằng có tên).
-- Lệnh nghi ngờ nhất luôn là: `make check-apis PROJECT=demoshop` — 42/42 mới tin.
+- Lệnh nghi ngờ nhất luôn là: `make check-apis PROJECT=demoshop` — 43/43 mới tin.
