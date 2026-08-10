@@ -8,6 +8,11 @@
 
 ---
 
+> **Cách dùng tài liệu này (luật human ban 2026-08-10).** Anh hỏi bất cứ mục nào chưa rõ, tôi giải thích xong
+> sẽ **viết thẳng phần giải thích đó vào đúng mục** trong file này — để tài liệu giàu thêm và dễ đọc hơn sau mỗi
+> câu hỏi, và để anh chỉ cần đọc file, không phải lội lại chat. Chỗ nào câu hỏi lộ ra lỗi của bản trước thì
+> đính chính được ghi ngay tại đó, giữ nguyên cả vết sai.
+
 ## LỘ TRÌNH — 10 BÀI TỪ 14 MỤC
 
 | Bài | Mục | Nội dung | Trạng thái |
@@ -112,6 +117,169 @@ Hình dạng chung của gói tin, viết gọn lại để nhớ:
 { "order_ref": "<mã đơn>",
   "items": [ { "product_id": "<SKU>", "qty": <số lượng>, "unit_price": <giá 1 đơn vị> }, … ] }
 ```
+
+#### Định dạng ĐẦY ĐỦ của một event — và vì sao `event_id` không nằm trong payload
+
+> ⚠ **Câu hỏi của học viên: "trong JSON kia không thấy `event_id`, nó được tạo thế nào?"**
+> Vì khối JSON đó **chỉ là cột `payload`** — tức phần *ruột*. `event_id` nằm ở lớp ngoài, gọi là **phong bì**
+> (envelope). Bản trước chỉ in ruột nên nhìn thiếu. Dưới đây là toàn bộ hai lớp.
+
+**Một event có hai lớp:**
+
+```
+PHONG BÌ (envelope) — ai · loại gì · lúc nào · số hiệu gì   → thành CÁC CỘT của raw_events
+   └── RUỘT (payload) — chi tiết riêng của từng loại        → thành MỘT CỘT jsonb duy nhất
+```
+
+Lớp phong bì, đúng theo hợp đồng `libs/common/contracts/events.py:151` (`EventEnvelope`):
+
+| Trường | Bắt buộc | Ràng buộc thật trong code | Nghĩa |
+|---|---|---|---|
+| `event_id` | ✅ | 1–128 ký tự | **số hiệu do NGƯỜI GỬI đặt** — khoá chống trùng |
+| `event_type` | ✅ | 1 trong 13 giá trị đóng | loại sự việc |
+| `event_time` | ✅ | **phải có múi giờ**; không quá tương lai 5 phút; không cũ quá 90 ngày | lúc việc xảy ra |
+| `user_pseudo_id` | ✅ | 1–128 ký tự | khách ẩn danh |
+| `schema_version` | — | mặc định `"1.0"` | phiên bản định dạng |
+| `session_id` | — | ≤128 ký tự | phiên duyệt web |
+| `attribution_token` | — | ≤128 ký tự | vết nguồn traffic |
+| `payload` | — | dict, kiểm theo `event_type` | ruột |
+
+Thân request gửi lên `POST /v1/events:ingest` là **một lô**, không phải một cái:
+
+```json
+{ "events": [ <phong bì 1>, <phong bì 2>, … ] }
+```
+
+Giới hạn thật: tối đa **1.000 event/lô** (`MAX_BATCH_SIZE`, `ingest.py:40`) và thân request ≤ **5 MB**
+(`main.py:439`).
+
+**Đơn hàng lúc 11:29 ở trên, viết ĐẦY ĐỦ cả hai lớp** (đây mới là thứ shop thật sự gửi đi):
+
+```json
+{
+  "events": [
+    {
+      "event_id": "ds8-ld-taytrang-garnier-2026-05-31-buy",
+      "event_type": "purchase.completed",
+      "event_time": "2026-05-31T11:29:24+00:00",
+      "user_pseudo_id": "u124",
+      "schema_version": "1.0",
+      "payload": {
+        "order_ref": "ds-ord-ld-taytrang-garnier-2026-05-31",
+        "items": [
+          { "product_id": "ld-taytrang-garnier", "qty": 4, "unit_price": 156000 },
+          { "product_id": "ld-kcn-anessa",       "qty": 1, "unit_price": 553000 },
+          { "product_id": "ld-srm-cerave",       "qty": 1, "unit_price": 355000 }
+        ]
+      }
+    }
+  ]
+}
+```
+
+#### `event_id` được tạo như thế nào?
+
+**Hệ KHÔNG tự sinh. Người gửi đặt, và bắt buộc phải có** — đây là chủ ý, không phải thiếu sót.
+
+Nhìn `event_id` thật trong dữ liệu demo sẽ thấy quy tắc đặt:
+
+```
+ds8 - ld-taytrang-garnier - 2026-05-31 - buy
+ │            │                  │        └── hành động
+ │            │                  └── ngày
+ │            └── SKU chính của đơn
+ └── nhãn bộ dữ liệu seed
+```
+
+Điểm mấu chốt: id này **suy ra được từ chính sự việc** (tất định), nên gửi lại lần thứ hai vẫn ra **đúng chuỗi
+đó**. Bảng `raw_events` có khoá chính `(project_id, event_id)` và ingest ghi bằng
+**`ON CONFLICT DO NOTHING`** (`ingest.py:231`):
+
+| Lần gửi | Kết quả |
+|---|---|
+| Lần 1 | ghi 1 dòng → đếm vào `accepted` |
+| Lần 2, 3, … cùng `event_id` | **không ghi gì** → đếm vào `deduped` |
+
+Nhờ vậy shop cứ **thử lại thoải mái khi mạng lỗi** mà không sợ nhân đôi doanh số.
+
+> ⛔ **Lỗi tích hợp phổ biến nhất ở chỗ này:** người gửi đặt `event_id` **ngẫu nhiên** (kiểu `uuid4()` mới mỗi
+> lần gửi). Khi đó lần thử lại tạo ra một id khác ⇒ hệ coi là sự việc mới ⇒ **doanh số nhân đôi**, âm thầm,
+> không có lỗi nào nổ ra. Quy tắc: **`event_id` phải suy ra được từ sự việc, không được sinh ngẫu nhiên.**
+
+Đáp lại, ingest trả về **thành công một phần** chứ không phải được-ăn-cả-ngã-về-không:
+
+```json
+{ "accepted": 3, "deduped": 1, "skipped": 0, "errors": [ { "index": 4, "code": "...", "message": "..." } ] }
+```
+
+- `accepted` — ghi mới · `deduped` — đã có rồi · `skipped` — loại event này service khác lo
+- `errors` — sai phong bì, **có chỉ số dòng** để biết cái nào hỏng; sai ruột thì rơi vào bảng `dead_events`
+  (không mất, mổ xẻ được sau).
+
+#### Ruột (`payload`) theo từng loại — hợp đồng thật
+
+| `event_type` | Trường bắt buộc trong payload | Ràng buộc |
+|---|---|---|
+| `purchase.completed` | `order_ref`, `items[]` | mỗi item: `product_id`, `qty ≥ 0`, `unit_price` **số nguyên** ≥ 0; `items` ít nhất 1 dòng |
+| `order.returned` | `order_ref`, `items[]` (+ `reason` tuỳ chọn) | cùng hình dạng `items` như trên |
+| `stock.out` | `product_id` | |
+| `price.changed` | `product_id`, `new_price` (+ `old_price` tuỳ chọn) | giá là **số nguyên** ≥ 0 |
+| `promo.scheduled` | `product_ids[]`, `discount_pct`, `start`, `end` | `0 ≤ discount_pct ≤ 100`; **`end` phải sau `start`** |
+
+Chú ý `unit_price` và `new_price` khai kiểu **`int`** ngay tại hợp đồng — tiền đi vào hệ đã là số nguyên (đồng)
+từ ngoài cửa, chứ không phải đến bảng `demand_daily` mới ép kiểu.
+
+#### Gửi thật trông như thế nào — hai header bắt buộc
+
+```bash
+curl -X POST http://localhost:16023/v1/events:ingest \
+  -H "Authorization: Bearer <API_KEY>" \
+  -H "X-Project-Id: demoshop" \
+  -H "Content-Type: application/json" \
+  -d '{ "events": [ { "event_id": "...", "event_type": "purchase.completed",
+                      "event_time": "2026-05-31T11:29:24+00:00",
+                      "user_pseudo_id": "u124",
+                      "payload": { "order_ref": "...", "items": [ ... ] } } ] }'
+```
+
+Hai header, thiếu cái nào cũng **401 `UNAUTHENTICATED`** (`main.py:356-370`):
+
+| Header | Vai trò |
+|---|---|
+| `Authorization: Bearer <key>` | chứng minh anh là ai |
+| `X-Project-Id: <shop>` | khai anh đang thao tác trên shop nào |
+
+Vì sao cần **cả hai** chứ không chỉ mỗi key? Vì key và project phải **khớp nhau**: cầm key của shop A mà khai
+`X-Project-Id: B` thì bị chặn. Đây là lớp khoá nằm trước cả RLS trong Postgres — hai lớp độc lập, cùng bảo vệ
+một thứ: **shop này không bao giờ thấy dữ liệu shop kia**.
+
+Mỗi response đều mang `X-Request-ID` (`main.py:259`) — có sự cố thì dò log theo mã đó.
+
+#### Vì sao có `skipped` — mỗi service chỉ nhận phần việc của mình
+
+13 loại event dùng chung một cửa, nhưng **mỗi service chỉ nhận loại nó cần**
+(`libs/common/contracts/routing.py:9`). Riêng **forecast (BT03) nhận đúng 5 loại**:
+
+| Loại event | smartsearch (BT01) | decision (BT02) | **forecast (BT03)** |
+|---|---|---|---|
+| `purchase.completed` | ✅ | ✅ | ✅ |
+| `stock.out` | ✅ | ✅ | ✅ |
+| `price.changed` | ✅ | ✅ | ✅ |
+| `promo.scheduled` | ✅ | ✅ | ✅ |
+| `order.returned` | — | ✅ | ✅ |
+| `stock.level` | ✅ | ✅ | — |
+| `cost.recorded` | — | ✅ | — |
+| `decision.feedback` · `competitor.price` | — | ✅ | — |
+| `product.viewed` · `product.clicked` · `cart.added` · `review.submitted` | ✅ | — | — |
+
+Bắn `product.viewed` vào cửa của forecast thì **không phải lỗi** — nó chỉ được đếm vào `skipped`, vì hành vi
+xem/click là chuyện của BT01. Đúng 5 loại ở cột phải chính là 5 loại đã học ở mục C.
+
+> **Đọc ra một tính chất kiến trúc:** khách hàng bắn **một luồng event duy nhất** cho cả ba bài toán, mỗi
+> service tự nhặt phần của mình. Nếu mỗi bài đòi một định dạng nhập riêng thì chi phí tích hợp của khách
+> nhân ba — và họ sẽ không mua.
+
+---
 
 miniAI **không tính toán gì** ở bước này: kiểm định dạng → tra API key để biết là shop nào → cất nguyên văn →
 trả lời ngay. Chú ý *"lẻ tẻ"* hiện ra rất rõ: 5 chai lúc 10 giờ, rồi 1-1-1 rải rác trưa. Không nhịp nào cả.
