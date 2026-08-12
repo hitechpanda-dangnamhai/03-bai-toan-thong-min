@@ -607,6 +607,138 @@ trả lời ngay. Chú ý *"lẻ tẻ"* hiện ra rất rõ: 5 chai lúc 10 gi�
 #### TẦNG 2 — đầu giờ kế tiếp, "người thư ký" gom sổ
 
 Cứ mỗi 3.600 giây, job `rollup` thức dậy và **cuộn** mọi sự việc thành **một dòng cho mỗi SKU mỗi ngày**.
+
+##### Trước hết: bảng `demand_daily` trông như thế nào?
+
+> ⚠ **Câu hỏi của học viên: "mục này là gộp data vào bảng `demand_daily` đúng không, cấu trúc bảng thế nào?"**
+> Đúng — tầng 2 chỉ có đúng một việc: **ghi vào `demand_daily`**. Đây là cấu trúc thật, đọc bằng
+> `\d demand_daily` trên DB đang chạy:
+
+```
+                Table "public.demand_daily"
+     Column     |  Type   | Nullable | Default
+----------------+---------+----------+---------
+ project_id     | text    | not null |            ← shop nào
+ product_id     | text    | not null |            ← SKU nào
+ day            | date    | not null |            ← ngày nào
+ units_sold     | numeric | not null | 0          ← bán ra (đã trừ hàng trả)
+ stockout       | boolean | not null | false      ← ngày đó có hết hàng không
+ price          | bigint  |          |            ← giá hiệu lực, ĐỒNG, số nguyên
+ promo_pct      | numeric | not null | 0          ← % giảm giá
+ adjusted_units | numeric |          |            ← CẦU đã bù ngày hết hàng
+Indexes:
+    "demand_daily_pkey" PRIMARY KEY, btree (project_id, product_id, day)
+Policies:
+    POLICY "tenant_isolation" USING (project_id = current_setting('app.project_id', true))
+```
+
+**Ba dòng cuối là phần quan trọng nhất:**
+
+- **Khoá chính `(project_id, product_id, day)`** — bộ ba này định nghĩa *"một dòng là gì"*: **một shop · một
+  SKU · một ngày = đúng MỘT dòng, không bao giờ hai**. Đây chính là thứ làm rollup chạy lại bao nhiêu lần cũng
+  ra cùng kết quả (`ON CONFLICT … DO UPDATE` = ghi đè chính nó, không đẻ thêm).
+- **`price` kiểu `bigint`** (số nguyên), không phải số thực — bất biến tiền tệ.
+- **`POLICY tenant_isolation`** — Postgres tự chèn `WHERE project_id = <shop đang đăng nhập>` vào **mọi** truy
+  vấn. Quên viết `WHERE` thì thấy **0 dòng**, chứ không thấy dữ liệu shop khác.
+
+Hình dung cho dễ: bảng này là **một tờ lịch cho mỗi SKU**. Mỗi ô là một ngày, ô nào cũng phải có (kể cả ngày
+bán 0), và trong ô ghi 5 con số — bán bao nhiêu · có hết hàng không · giá bao nhiêu · giảm bao nhiêu % · cầu
+thật ước tính bao nhiêu.
+
+##### Quá trình "gom theo SKU" — xem tận mắt bằng số thật
+
+Lấy **hai SKU, hai ngày** để thấy đủ mọi phép gom cùng lúc.
+
+**Bước 1 — nguyên liệu thô.** Tám dòng hàng có thật trong `raw_events` (đã mở mảng `items` ra):
+
+| # | Lúc | `order_ref` | SKU | qty | unit_price |
+|---|---|---|---|---|---|
+| 1 | 05-31 10:04:41 | `ds-ord-ld-srm-cerave-2026-05-31` | `ld-srm-cerave` | 5 | 355.000 |
+| 2 | 05-31 11:29:24 | `ds-ord-ld-taytrang-garnier-…` | `ld-kcn-anessa` | 1 | 553.000 |
+| 3 | 05-31 11:29:24 | `ds-ord-ld-taytrang-garnier-…` | `ld-srm-cerave` | 1 | 355.000 |
+| 4 | 05-31 11:41:42 | `ds-ord-ld-kcn-anessa-…` | `ld-kcn-anessa` | 7 | 553.000 |
+| 5 | 05-31 11:41:42 | `ds-ord-ld-kcn-anessa-…` | `ld-srm-cerave` | 1 | 355.000 |
+| 6 | 05-31 12:59:13 | `ds-ord-ld-toner-klairs-…` | `ld-srm-cerave` | 1 | 355.000 |
+| 7 | 06-01 16:00:44 | `ds-ord-ld-kcn-anessa-2026-06-01` | `ld-kcn-anessa` | 3 | 553.000 |
+| 8 | 06-01 16:22:12 | `ds-ord-ld-srm-cerave-2026-06-01` | `ld-srm-cerave` | 3 | 355.000 |
+
+Để ý dòng 2-3 và 4-5: **cùng một giây, cùng một đơn**, nhưng là **hai SKU khác nhau** — vì một đơn là một giỏ
+nhiều mặt hàng. Rollup **không quan tâm đơn nào**; nó chỉ quan tâm cặp **(SKU, ngày)**.
+
+**Bước 2 — xếp vào ô.** Mỗi dòng hàng rơi vào đúng một ô `(SKU, ngày)`:
+
+```
+                     │  ngày 2026-05-31         │  ngày 2026-06-01
+─────────────────────┼──────────────────────────┼──────────────────
+ ld-srm-cerave       │  #1(5) #3(1) #5(1) #6(1) │  #8(3)
+ ld-kcn-anessa       │  #2(1) #4(7)             │  #7(3)
+```
+
+**Bước 3 — cộng trong từng ô.**
+
+```
+ld-srm-cerave · 31/05 :  5 + 1 + 1 + 1  = 8
+ld-kcn-anessa · 31/05 :  1 + 7          = 8
+ld-srm-cerave · 01/06 :  3              = 3
+ld-kcn-anessa · 01/06 :  3              = 3
+```
+
+**Bước 4 — kết quả thật trong `demand_daily`** (đọc thẳng từ DB, đối chiếu với phép cộng trên):
+
+| product_id | day | units_sold | price | stockout | promo_pct | adjusted_units |
+|---|---|---|---|---|---|---|
+| `ld-kcn-anessa` | 2026-05-31 | **8** | 553.000 | f | 0 | 8 |
+| `ld-srm-cerave` | 2026-05-31 | **8** | 355.000 | f | 0 | 8 |
+| `ld-kcn-anessa` | 2026-06-01 | **3** | 553.000 | f | 0 | 3 |
+| `ld-srm-cerave` | 2026-06-01 | **3** | 355.000 | f | 0 | 3 |
+
+**8 dòng hàng thô → 4 dòng ngày.** Khớp từng con số.
+
+##### Bốn phép gom xảy ra đồng thời — đừng nhầm chúng với nhau
+
+| Phép | Gom cái gì | Công thức | Ví dụ ở trên |
+|---|---|---|---|
+| **Cộng lượng** | `qty` mọi dòng hàng cùng ô | `Σ qty` | 5+1+1+1 = 8 |
+| **Bình quân giá** | tiền / lượng, **gia quyền** | `Σ(qty×price) / Σ qty` | cả 4 lượt cùng 355.000 ⇒ vẫn 355.000 |
+| **HOẶC cờ hết hàng** | có **một** event `stock.out` là bật | `OR` | không có ⇒ `false` |
+| **LẤY SÂU NHẤT** | nhiều đợt promo chồng nhau | `max(discount_pct)` | không có ⇒ 0 |
+
+Bốn phép này **khác nhau về bản chất** — đây là chỗ dễ sai nhất nếu tự viết lại rollup:
+
+- Lượng thì **cộng**: bán 2 lần, mỗi lần 3 cái, là 6 cái.
+- Giá thì **không cộng**, và cũng **không lấy trung bình cộng đơn thuần**. Nếu ngày đó bán 5 cái giá 100.000 và
+  1 cái giá 90.000 thì giá hiệu lực là `(5×100.000 + 1×90.000) / 6 = 590.000/6 = 98.333` —
+  **không phải** `(100.000+90.000)/2 = 95.000`. Trung bình cộng đơn thuần cho hai mức giá cùng trọng số, sai
+  về kinh tế.
+- Cờ hết hàng thì **HOẶC**: hết hàng 10 phút cuối ngày cũng là `true`. Không có "hết hàng 30%".
+- Promo chồng nhau lấy **sâu nhất**, không cộng dồn: hai đợt 20% và 30% cùng ngày ⇒ `30`, **không phải** 50.
+
+##### Còn hai việc nữa rollup làm mà nhìn bảng không thấy
+
+**(a) Điền ngày trống.** Rollup lặp **từng ngày** từ ngày đầu tiên của SKU tới hôm nay. Ngày không có event nào
+vẫn đẻ ra một dòng `units_sold = 0`. Bỏ trống thì thư viện thống kê sẽ nội suy hoặc bỏ qua, và mức nền bị thổi
+lên. **Vắng mặt là con số 0 thật, không phải "không biết".**
+
+**(b) Nhớ giá của ngày không bán.** Ngày không ai mua thì không có giá bình quân để tính — rollup **mang giá gần
+nhất sang** (carry-forward mốc `price.changed`). Vì thế cột `price` gần như không bao giờ trống, kể cả ngày bán 0.
+
+Số đo thật một lượt rollup (2026-08-10, toàn bộ 8 tenant): **2 giây** cho 1.160 SKU / 49.640 ngày-SKU — khoảng
+**25.000 ô lịch mỗi giây**.
+
+##### Vì sao phải có tầng này? Sao model không đọc thẳng `raw_events`?
+
+| Nếu bắt model đọc thẳng event thô | Hậu quả |
+|---|---|
+| Mỗi lần dự báo phải mở mảng `items` của hàng triệu dòng | chậm gấp hàng trăm lần, lặp lại y hệt mỗi ngày |
+| Không có dòng cho ngày bán 0 | chuỗi thủng lỗ ⇒ mức nền bị thổi ⇒ dự báo cao giả |
+| Không có chỗ nào ghi `adjusted_units` | không bù được ngày hết hàng ⇒ học nhầm "cầu đang giảm" |
+| Mỗi model tự gom theo cách của mình | hai model ra hai con số khác nhau cho **cùng một ngày** — không ai gỡ nổi |
+
+Dòng cuối là lý do mạnh nhất: `demand_daily` là **một bản sự thật duy nhất về quá khứ**, mọi model đọc cùng nó.
+Tranh cãi về *dự báo* thì còn có chỗ; tranh cãi về *"hôm 31/05 bán mấy cái"* thì không.
+
+##### Quay lại một dòng cụ thể
+
 Dòng thật trong `demand_daily`:
 
 ```
