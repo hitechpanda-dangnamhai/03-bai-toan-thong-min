@@ -905,21 +905,135 @@ một ngày — nó lệch cả tham số của shop đó.
 
 **CẦU ước tính** sau khi bù cho ngày hết hàng. Đây là **cột mà mọi model đọc** — không phải `units_sold`.
 
-Ví dụ thật, `ld-son-3ce` ngày 2026-08-05:
+Hai cột này trả lời **hai câu hỏi khác nhau**:
+
+| Cột | Trả lời câu | Ai quan tâm |
+|---|---|---|
+| `units_sold` | *"Ngày đó **bán được** bao nhiêu?"* | kế toán, doanh thu |
+| `adjusted_units` | *"Ngày đó thị trường **muốn mua** bao nhiêu?"* | **model dự báo** |
+
+Hai câu chỉ khác nhau đúng vào **ngày hết hàng** — ngày mà tồn kho chặn bớt nhu cầu. Đếm thật: **4.669 dòng**
+có `adjusted_units ≠ units_sold`; mọi dòng còn lại hai cột **bằng nhau y hệt**.
+
+##### Công thức, đúng theo code (`rollup.py:218-228`)
+
+```python
+for r in rows:                              # rows đã sắp theo NGÀY tăng dần
+    if r["stockout"]:
+        if adjusted_prev:                                        # đã có ngày trước
+            trailing = sum(adjusted_prev[-7:]) / len(adjusted_prev[-7:])
+        else:                                                    # ngày đầu tiên của SKU
+            trailing = 0.0
+        adj = max(r["units_sold"], trailing)                     # ← NHÁNH HẾT HÀNG
+    else:
+        adj = r["units_sold"]                                    # ← NHÁNH BÌNH THƯỜNG
+    adjusted_prev.append(adj)                                    # ← ĐỆ QUY: đẩy adj vào lịch sử
+```
+
+Đọc thành lời:
+
+- Ngày **không** hết hàng ⇒ chép nguyên `units_sold`. Không đoán gì cả.
+- Ngày **có** hết hàng ⇒ lấy **số lớn hơn** giữa *"số thật bán được"* và *"trung bình 7 ngày gần nhất"*.
+
+##### Ca thật, tính tay từng bước — `ld-son-3ce` (son 3CE), shop `demoshop`
+
+Đây là ca đẹp vì có **hai ngày hết hàng LIÊN TIẾP** (04/08 và 05/08):
+
+| ngày | `units_sold` | `stockout` | `adjusted_units` |
+|---|---|---|---|
+| 26/07 | 1 | f | 1 |
+| 27/07 | 3 | f | 3 |
+| 28/07 | 2 | f | 2 |
+| 29/07 | 1 | f | 1 |
+| 30/07 | 3 | f | 3 |
+| 31/07 | 1 | f | 1 |
+| 01/08 | 1 | f | 1 |
+| 02/08 | 2 | f | 2 |
+| 03/08 | 1 | f | 1 |
+| **04/08** | **0** | **t** | **1,571429** |
+| **05/08** | **0** | **t** | **1,510204** |
+| 06/08 | 1 | f | 1 |
+| 07/08 | 2 | f | 2 |
+
+**Ngày 04/08** — hết hàng, bán được 0. Bảy giá trị `adjusted` gần nhất là của 28/07 → 03/08:
 
 ```
-units_sold     = 0        ← bán được 0 vì HẾT HÀNG
-stockout       = true
-adjusted_units = 1,5102…  ← trung bình 7 ngày trước đó
+[2, 1, 3, 1, 1, 2, 1]
+trailing = (2+1+3+1+1+2+1) / 7 = 11 / 7 = 1,571428…
+adj      = max(0 ; 1,571428…)   = 1,571429      ← đúng con số trong DB
 ```
 
-Đếm thật: **4.669 dòng** có `adjusted_units ≠ units_sold` — tức 4.669 ngày-SKU mà nếu đọc `units_sold` thì
-model sẽ hiểu sai cầu.
+**Ngày 05/08** — lại hết hàng. Bảy giá trị `adjusted` gần nhất là của 29/07 → **04/08**:
 
-- Ngày **không** hết hàng: `adjusted_units = units_sold`, y hệt. Đó là lý do phần lớn dòng hai cột bằng nhau.
-- Ngày **có** hết hàng: `max(units_sold, trung bình 7 ngày adjusted trước đó)` — lấy `max` nên không bao giờ
-  hạ số thật xuống. Ví dụ `bh-coca-thung` ngày 29/07: bán 1, hết hàng ⇒ `adjusted = 1,6734…`.
-- Cột này để `NULL` được về mặt kiểu, nhưng **thực tế 0 dòng NULL** — vì rollup luôn tính pass 2.
+```
+[1, 3, 1, 1, 2, 1, 1,571429]      ← phần tử cuối là adj của 04/08, KHÔNG phải units_sold=0
+trailing = 10,571429 / 7 = 1,510204…
+adj      = max(0 ; 1,510204…)     = 1,510204     ← đúng con số trong DB
+```
+
+##### ⭐ Điểm mấu chốt: đệ quy trên chính cột `adjusted`, không phải trên `units_sold`
+
+Nhìn kỹ dòng cuối của phép tính ngày 05/08: phần tử thứ 7 là **`1,571429`** — tức giá trị **đã bù** của ngày
+04/08, **không phải** `units_sold = 0` của ngày đó.
+
+Nếu code lấy trung bình trên `units_sold` (tức dùng số `0` thật), kết quả sẽ là:
+
+```
+[1, 3, 1, 1, 2, 1, 0]  →  9 / 7 = 1,285714      ← THẤP HƠN 1,510204
+```
+
+Chênh lệch một ngày trông nhỏ, nhưng nó **tích luỹ**: hết hàng 5 ngày liên tiếp thì mỗi ngày lại kéo trung
+bình xuống thêm, và cột "cầu" tụt dần về 0 — **đúng cái vòng xoáy mà nó sinh ra để chặn**:
+
+```
+hết hàng → bán 0 → cầu ước tính tụt → dự báo thấp → nhập ít → hết hàng sớm hơn → …
+```
+
+Đệ quy trên `adjusted` giữ mức nền **đứng yên** trong suốt đợt hết hàng, thay vì trôi xuống.
+
+##### Bốn lựa chọn thiết kế trong công thức, và lý do từng cái
+
+**(1) Vì sao `max()` mà không lấy thẳng `trailing`?**
+Vì có ca hết hàng **vào cuối ngày**: bán được 15 cái rồi mới sạch kệ, trong khi trung bình 7 ngày chỉ 10. Nếu
+lấy thẳng `trailing` thì **hạ số thật xuống** 10 — vứt mất thông tin có thật. `max` bảo đảm: **không bao giờ
+ghi thấp hơn số đã bán được**.
+
+**(2) Vì sao 7 ngày mà không phải 3 hay 30?**
+7 ngày = **đúng một tuần**, nên trung bình phủ đủ cả thứ Hai lẫn Chủ nhật — không bị lệch vì rơi vào toàn ngày
+cuối tuần. Đủ ngắn để bám mức gần đây, đủ dài để không giật theo một ngày bất thường.
+
+**(3) Cửa sổ chưa đủ 7 ngày thì sao?**
+`adjusted_prev[-7:]` lấy **tối đa** 7 phần tử, và mẫu số là `len()` của lát cắt đó — tức nếu SKU mới có 3 ngày
+lịch sử thì chia cho **3**, không chia cứng cho 7. Không có chuyện pha loãng bằng số 0 ảo.
+
+**(4) Ngày ĐẦU TIÊN của SKU mà đã hết hàng?**
+`adjusted_prev` rỗng ⇒ `trailing = 0.0` ⇒ `adj = max(units_sold, 0) = units_sold`. Tức **không bù gì cả** —
+đúng: chưa có lịch sử thì không có cơ sở nào để đoán, thà để nguyên số thật còn hơn bịa.
+
+##### Giới hạn phải nói thẳng
+
+Cột này là **ƯỚC LƯỢNG, không phải sự thật**. Nó giả định *"cầu hôm nay giống mức trung bình tuần vừa rồi"*.
+Nếu cầu **thật sự sập** đúng vào đợt hết hàng (hết mốt, qua mùa, đối thủ phá giá), cột bù sẽ **giữ mức cao lâu
+hơn thực tế** ⇒ dự báo hơi cao ⇒ nhập hơi dư.
+
+Đây là đánh đổi có chủ ý: **nhập dư đắt, nhưng đứt hàng còn đắt hơn** (mất lãi + mất khách + vòng xoáy tự
+xác nhận). Chọn sai theo hướng an toàn.
+
+##### Về chuyện `NULL`
+
+Kiểu cột cho phép `NULL`, nhưng **thực tế 0 dòng NULL** — vì rollup luôn chạy pass 2 và gán `adj` cho **mọi**
+dòng trước khi ghi. Nên nếu có ngày anh thấy `adjusted_units IS NULL`, đó **không phải chuyện bình thường**:
+nó nghĩa là dòng đó được ghi bởi một đường **không đi qua pass 2** — dấu hiệu rollup chết giữa chừng hoặc có
+ai đó `INSERT` tay vào bảng. Đáng đi soi ngay.
+
+##### Ai đọc cột này
+
+`store/forecasts.py:26` — hàm nạp chuỗi lịch sử cho model **đọc `adjusted_units`**, không đọc `units_sold`.
+Nghĩa là toàn bộ 9 model trong thang, backtest, và cả bước học hệ số promo `k` đều ăn cột này. `units_sold`
+chỉ còn dùng để **đối chiếu và báo cáo**.
+
+> Một câu đáng thuộc: **`units_sold` là quá khứ đã xảy ra; `adjusted_units` là quá khứ ĐÁNG LẼ đã xảy ra nếu
+> kho không hết hàng.** Model học cái thứ hai.
 
 ---
 
