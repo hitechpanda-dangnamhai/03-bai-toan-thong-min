@@ -632,18 +632,182 @@ Policies:
     POLICY "tenant_isolation" USING (project_id = current_setting('app.project_id', true))
 ```
 
-**Ba dòng cuối là phần quan trọng nhất:**
-
-- **Khoá chính `(project_id, product_id, day)`** — bộ ba này định nghĩa *"một dòng là gì"*: **một shop · một
-  SKU · một ngày = đúng MỘT dòng, không bao giờ hai**. Đây chính là thứ làm rollup chạy lại bao nhiêu lần cũng
-  ra cùng kết quả (`ON CONFLICT … DO UPDATE` = ghi đè chính nó, không đẻ thêm).
-- **`price` kiểu `bigint`** (số nguyên), không phải số thực — bất biến tiền tệ.
-- **`POLICY tenant_isolation`** — Postgres tự chèn `WHERE project_id = <shop đang đăng nhập>` vào **mọi** truy
-  vấn. Quên viết `WHERE` thì thấy **0 dòng**, chứ không thấy dữ liệu shop khác.
-
 Hình dung cho dễ: bảng này là **một tờ lịch cho mỗi SKU**. Mỗi ô là một ngày, ô nào cũng phải có (kể cả ngày
 bán 0), và trong ô ghi 5 con số — bán bao nhiêu · có hết hàng không · giá bao nhiêu · giảm bao nhiêu % · cầu
 thật ước tính bao nhiêu.
+
+##### Mổ TỪNG CỘT — nghĩa là gì, ví dụ thật, và cạm bẫy
+
+> ⚠ **Câu hỏi của học viên: "các trường field ghi tóm tắt quá, giải thích từng trường và ví dụ được không?"**
+> Dưới đây là từng cột một. Mọi ví dụ và mọi con số đếm được đều **truy thẳng từ DB** lúc 03:55 ngày 12/08.
+
+---
+
+**1. `project_id` · kiểu `text` · BẮT BUỘC**
+
+Shop nào sở hữu dòng này. Trong dữ liệu thật đang có 8 giá trị: `demoshop` (shop demo tiếng Việt), `p1`,
+`simworld1..4` (thế giới mô phỏng để chấm điểm), `bulktest`, `seedtest`.
+
+- **Không phải cột thường** — nó là **cột cách ly**. Cùng một `product_id` ở hai shop khác nhau là **hai mặt
+  hàng hoàn toàn khác nhau**, không bao giờ được lẫn số.
+- Khách **không tự khai** cột này; nó suy ra từ API key (mục B). Kể cả khách có cố gửi `project_id` khác thì
+  cũng vô ích.
+- Đây là cột mà `POLICY tenant_isolation` bám vào (giải thích ở cuối mục).
+
+---
+
+**2. `product_id` · kiểu `text` · BẮT BUỘC**
+
+Mã SKU **do shop tự đặt**, miniAI không sinh. Ví dụ thật trong `demoshop`: `ld-srm-cerave` ·
+`bh-cafe-g7` · `dt-iphone15-128` · `tt-aothun-nu-form`. Shop `p1` thì đặt kiểu máy: `p_a88a66e84614`.
+
+- miniAI **không hiểu ý nghĩa** của chuỗi này — với nó `ld-srm-cerave` chỉ là một nhãn. Cách đặt tên đẹp là
+  để **người** đọc, không phải để máy suy luận.
+- Cặp `(project_id, product_id)` là danh tính đầy đủ của một mặt hàng.
+
+---
+
+**3. `day` · kiểu `date` · BẮT BUỘC**
+
+Ngày lịch — **chỉ ngày, không có giờ, không có múi giờ**. `2026-05-31`, hết.
+
+- Đây là chỗ **đổi đơn vị**: `raw_events.event_time` chính xác tới giây và có múi giờ; sang đây bị "nén" thành
+  một ngày. Sau bước này, mọi thứ trong BT03 chạy theo nhịp NGÀY.
+- Chính vì nén nên câu hỏi *"23:59:59 thuộc ngày nào"* là chuyện có thật — cảnh báo §11.5 về "kiểu ngày" của
+  tenant `p1` sinh ra từ đây.
+
+---
+
+**4. `units_sold` · kiểu `numeric` · BẮT BUỘC · mặc định `0`**
+
+Số lượng **bán ra** trong ngày, đã trừ hàng trả.
+
+```
+ld-srm-cerave · 2026-05-31 · units_sold = 8      ← 5 + 1 + 1 + 1 (bốn đơn)
+```
+
+Ba điều dễ hiểu nhầm:
+
+- **`numeric` chứ không phải số nguyên.** Số lẻ là hợp lệ và **có thật**: đếm được **301 dòng** có
+  `units_sold` không nguyên, ví dụ tenant mô phỏng `m17d-wire-async` ngày 12/06 có
+  `units_sold = 6,87196683917459…`. Lý do: hợp đồng khai `qty: float` (bán theo cân, theo lít, hoặc dữ liệu mô
+  phỏng), và `numeric` là kiểu **thập phân chính xác** — không phải `float` — nên cộng hàng triệu dòng không
+  trôi số lẻ.
+- **Mặc định `0`, không phải NULL.** Ngày không bán gì ⇒ `0`. Đây là con số **thật**, không phải "không biết".
+- **Đã trừ hàng trả, và bị kẹp ở 0.** Ngày có nhiều hàng trả hơn hàng bán ⇒ vẫn ghi `0`, không ghi số âm.
+
+---
+
+**5. `stockout` · kiểu `boolean` · BẮT BUỘC · mặc định `false`**
+
+Ngày đó SKU có **hết hàng** hay không. Bật lên khi trong ngày có ít nhất một event `stock.out`.
+
+Đếm thật: **6.437 dòng** đang mang `stockout = true`.
+
+- Đây là cột **nhỏ nhất mà nặng ký nhất**: chỉ 1 bit, nhưng nó là thứ phân biệt *"không ai muốn mua"* với
+  *"muốn mua mà không có hàng"*.
+- Không có mức độ: hết hàng 10 phút cuối ngày hay hết cả ngày đều là `true`. Muốn biết mức độ thì phải nhìn
+  `stock.level` — nhưng BT03 cố ý **không nhận** loại đó.
+
+---
+
+**6. `price` · kiểu `bigint` · CÓ THỂ NULL**
+
+Giá hiệu lực của một đơn vị hàng trong ngày, đơn vị **đồng**, **số nguyên**.
+
+```
+bh-cafe-g7 · price = 176000        →  đọc là 176.000đ
+dt-iphone15-128 · new_price = 16348000  →  16.348.000đ
+```
+
+- **`bigint` chứ không phải `float`** — nếu để số thực, `176000` có thể thành `176000.00000000001`; cộng vài
+  triệu dòng là lệch sổ. Bất biến tiền tệ, và nó được ép **từ ngoài cửa** (hợp đồng khai `unit_price: int`).
+- Không có dấu chấm, không có ký hiệu tiền tệ, không có số thập phân. Đồng Việt Nam không có xu nên hợp.
+- **Có thể NULL, và NULL rất phổ biến: 47.448 dòng.** Ví dụ thật: shop `p1`, SKU `p_a88a66e84614`, ngày
+  04/07 → `price` trống. Nguyên nhân: shop đó **chưa từng bắn `price.changed` nào**, mà ngày đó cũng không
+  có giao dịch để tính giá bình quân ⇒ không có gì để ghi. **Thà để trống còn hơn bịa số 0** — giá 0đ sẽ làm
+  mô hình co giãn giá của BT02 điên loạn.
+
+---
+
+**7. `promo_pct` · kiểu `numeric` · BẮT BUỘC · mặc định `0`**
+
+Phần trăm giảm giá đang áp cho SKU trong ngày. **Đơn vị là PHẦN TRĂM, không phải tỷ lệ**: `10` nghĩa là giảm
+10%, không phải 0,1.
+
+Ba dòng thật của `demoshop` ngày 11/08:
+
+| product_id | units_sold | price | promo_pct |
+|---|---|---|---|
+| `gd-noichien-philips` | 2 | 2.116.000 | **15** |
+| `mb-ta-bobby-m` | 5 | 277.000 | **12** |
+| `bh-cafe-g7` | 3 | 176.000 | **10** |
+
+Đếm thật: **6.718 dòng** đang có `promo_pct > 0`.
+
+- Cột này **không đến từ giao dịch** mà đến từ event `promo.scheduled` — loại duy nhất mang một **khoảng**
+  thời gian. Rollup "tô" `discount_pct` ra từng ngày trong `[start, end]`.
+- Nhiều đợt chồng nhau ⇒ lấy **sâu nhất** (`max`), không cộng dồn.
+- Đây là đầu vào để BT03 học hệ số uplift `k` — *"giảm 1% thì bán tăng bao nhiêu"*.
+
+---
+
+**8. `adjusted_units` · kiểu `numeric` · CÓ THỂ NULL (thực tế: chưa dòng nào NULL)**
+
+**CẦU ước tính** sau khi bù cho ngày hết hàng. Đây là **cột mà mọi model đọc** — không phải `units_sold`.
+
+Ví dụ thật, `ld-son-3ce` ngày 2026-08-05:
+
+```
+units_sold     = 0        ← bán được 0 vì HẾT HÀNG
+stockout       = true
+adjusted_units = 1,5102…  ← trung bình 7 ngày trước đó
+```
+
+Đếm thật: **4.669 dòng** có `adjusted_units ≠ units_sold` — tức 4.669 ngày-SKU mà nếu đọc `units_sold` thì
+model sẽ hiểu sai cầu.
+
+- Ngày **không** hết hàng: `adjusted_units = units_sold`, y hệt. Đó là lý do phần lớn dòng hai cột bằng nhau.
+- Ngày **có** hết hàng: `max(units_sold, trung bình 7 ngày adjusted trước đó)` — lấy `max` nên không bao giờ
+  hạ số thật xuống. Ví dụ `bh-coca-thung` ngày 29/07: bán 1, hết hàng ⇒ `adjusted = 1,6734…`.
+- Cột này để `NULL` được về mặt kiểu, nhưng **thực tế 0 dòng NULL** — vì rollup luôn tính pass 2.
+
+---
+
+##### Hai dòng cuối của schema — khoá chính và RLS
+
+**`PRIMARY KEY (project_id, product_id, day)`**
+
+Bộ ba này định nghĩa *"một dòng là gì"*: **một shop · một SKU · một ngày = đúng MỘT dòng, không bao giờ hai**.
+
+Hệ quả nghe thì nhỏ mà rất lớn: rollup dùng `INSERT … ON CONFLICT (project_id, product_id, day) DO UPDATE`,
+tức **gặp dòng cũ thì ghi đè chính nó**. Cho nên chạy rollup 1 lần hay 50 lần đều ra cùng kết quả — job chết
+giữa chừng cứ chạy lại, không sợ nhân đôi số liệu.
+
+**`POLICY tenant_isolation USING (project_id = current_setting('app.project_id', true))`**
+
+Postgres **tự chèn** điều kiện `WHERE project_id = <shop đang đăng nhập>` vào **mọi** câu truy vấn chạm bảng
+này. Lập trình viên quên viết `WHERE` thì thấy **0 dòng**, chứ không bao giờ thấy dữ liệu shop khác.
+
+Đây là **lớp khoá thứ hai**, độc lập với lớp API key ở mục B. Hai lớp cùng bảo vệ một thứ: shop này không bao
+giờ thấy dữ liệu shop kia. Muốn thủng thì phải thủng cả hai.
+
+> ⚠ **Cạm bẫy khi tự kiểm tra RLS:** role `miniai` là **chủ bảng**, mà Postgres cho chủ bảng **bỏ qua RLS**.
+> Nên gõ `psql -U miniai` rồi thấy đủ 8 tenant thì **không có nghĩa là RLS hỏng**. Muốn kiểm thật phải dùng
+> role `miniai_app` — đúng role mà đường request của service dùng.
+
+##### Bảng tra nhanh cả 8 cột
+
+| Cột | Kiểu | NULL? | Đơn vị | Ví dụ thật | Đếm ca đặc biệt |
+|---|---|---|---|---|---|
+| `project_id` | text | không | — | `demoshop` | 8 tenant |
+| `product_id` | text | không | — | `ld-srm-cerave` | — |
+| `day` | date | không | ngày | `2026-05-31` | — |
+| `units_sold` | numeric | không (mặc định 0) | cái | `8` | 301 dòng số lẻ |
+| `stockout` | boolean | không (mặc định false) | — | `true` | 6.437 dòng `true` |
+| `price` | bigint | **CÓ** | đồng | `176000` | **47.448 dòng NULL** |
+| `promo_pct` | numeric | không (mặc định 0) | **%** | `15` | 6.718 dòng > 0 |
+| `adjusted_units` | numeric | có (thực tế 0) | cái | `1,5102…` | 4.669 dòng ≠ `units_sold` |
 
 ##### Quá trình "gom theo SKU" — xem tận mắt bằng số thật
 
