@@ -1235,6 +1235,46 @@ Và `empirical_coverage = 0,952` nghĩa là khoảng `[p10,p90]` **đo được*
 
 Số đo thật một lượt: **334 giây** cho 1.793 SKU, ghi 50.204 dòng dự báo.
 
+> ⚠ **Ba câu hỏi của học viên về đúng đoạn này (2026-08-12):** *"hệ số khuyến mãi của shop là gì?"* ·
+> *"gỡ ảnh hưởng sale ra khỏi lịch sử là gì?"* · *"job chỉ chạy 1 lần thì bảng `forecasts` trông ra sao,
+> từng cột nghĩa là gì?"*
+> Câu 1 và 2 được mổ đầy đủ ở **[§F](#f)** (có phép tính tay trên số thật), câu 3 ở **[§G](#g)**
+> (12 cột, từng cột một). Ngay dưới đây trả lời gọn phần *"chỉ chạy 1 lần"*, vì nó là chỗ dễ hiểu nhầm nhất.
+
+##### "Chạy 1 lần" nghĩa là gì — một lượt chạy đẻ ra bao nhiêu dòng?
+
+Một lượt **không** đẻ ra một dòng. Nó đẻ ra **28 dòng cho mỗi SKU** — mỗi ngày tương lai một dòng
+(`HORIZON_DEFAULT = 28`, `forecast_run.py:43`). Đo thật mẻ `r_2026-08-12` của `demoshop`:
+
+```
+132 SKU  ×  28 ngày  =  3.696 dòng      ← đúng bằng số đếm được trong DB
+```
+
+Và các mẻ **cộng dồn**, không đè nhau — mỗi mẻ có `run_id` riêng:
+
+| `run_id` | dòng | SKU | ngày được dự báo | sinh lúc |
+|---|---|---|---|---|
+| `r_2026-08-05` | 3.164 | 113 | 06/08 → 02/09 | 05/08 08:27 |
+| `r_2026-08-06` | 3.472 | 124 | 07/08 → 03/09 | 06/08 10:23 |
+| `r_2026-08-07` | 3.598 | 129 | 08/08 → 04/09 | 07/08 02:56 |
+| `r_2026-08-10` | 3.612 | 129 | 11/08 → 07/09 | 10/08 02:22 |
+| `r_2026-08-11` | 3.696 | 132 | 12/08 → 08/09 | 11/08 04:28 |
+| `r_2026-08-12` | 3.696 | 132 | 13/08 → 09/09 | 12/08 03:54 |
+
+Ba điều đọc ra từ chính bảng này:
+
+1. **Thiếu 08/08 và 09/08.** Không phải lỗi trình bày — hai ngày đó job **không chạy** (máy tắt cuối tuần).
+   Bảng `forecasts` là sổ ghi *"đã thực sự chạy lúc nào"*, nên nó tố cáo được cả những ngày hệ nghỉ.
+2. **Số SKU tăng dần** (113 → 132): shop bán thêm mặt hàng mới, mỗi ngày lại có thêm SKU đủ dữ liệu để dự báo.
+3. **Cùng một ngày lịch được dự báo nhiều lần.** Ngày 13/08 có mặt trong cả 6 mẻ. Sáu con số cho cùng một ngày,
+   sinh ở sáu thời điểm khác nhau — càng gần thì càng nhiều thông tin. Tầng 4 luôn đọc **mẻ mới nhất**;
+   các mẻ cũ ở lại để đối chiếu *"hôm đó anh khuyên tôi nhập bao nhiêu?"*.
+
+**Chạy hai lần trong CÙNG một ngày thì sao?** `run_id = "r_" + ngày hôm nay` (`forecast_run.py:1098`) nên hai
+lượt cùng ngày dùng **chung một `run_id`**; `save_run` **xoá sạch dòng cùng `run_id` của SKU đó rồi ghi lại**
+(`store/forecasts.py:96-104`). Tức lượt sau **đè** lượt trước, không nhân đôi. Đây là cùng một tính chất
+*chạy-lại-được* của rollup, chỉ khác khoá.
+
 ---
 
 #### TẦNG 4 — 8 giờ sáng, người mua hàng mở máy
@@ -1478,6 +1518,216 @@ Số đo thật một lượt batch toàn bộ tenant (2026-08-10 01:41→01:47)
 
 ---
 
+### F.1 · "HỆ SỐ KHUYẾN MÃI CỦA SHOP" (`k`) — MỔ KỸ
+
+> ⚠ **Câu hỏi của học viên: "hệ số khuyến mãi của shop là gì?"**
+> Toàn bộ phần này đọc từ `core/promo_uplift.py` (132 dòng) + `jobs/forecast_run.py:333-388`, và mọi con số
+> đều truy thẳng từ DB đang chạy lúc 2026-08-12.
+
+#### Nó trả lời đúng MỘT câu hỏi
+
+> *"Ở shop này, giảm giá thì bán tăng bao nhiêu?"*
+
+Công thức dùng nó nằm ngay đầu file (`promo_uplift.py:5`):
+
+```
+số bán ngày sale  =  số bán ngày thường  ×  (1 + k × mức_giảm)
+```
+
+`mức_giảm` là **tỷ lệ** (0..1), không phải phần trăm: giảm 24,3% ⇒ `0,243`.
+
+Cách nhớ nhanh: cho `mức_giảm = 0,01` (giảm 1%) thì thừa số là `1 + 0,01k` ⇒ **giảm 1% thì bán tăng khoảng `k` phần trăm.**
+
+| `k` | Nghĩa nghiệp vụ |
+|---|---|
+| `k = 0` | giảm giá **không** làm bán thêm cái nào — sale vô ích |
+| `k = 1` | giảm 10% thì bán tăng 10% (doanh thu gần như đứng yên) |
+| `k = 3` | giảm 10% thì bán tăng 30% — hàng rất nhạy giá |
+
+**Vì sao phải HỌC chứ không đặt hằng số?** Trong code vẫn có một hằng số `PROMO_UPLIFT_K = 1.5`
+(`forecast_run.py:46`) — nhưng nó chỉ là **phao cứu sinh** khi không học nổi. Lý do: mỗi ngành hàng nhạy giá
+một kiểu. Đo thật 10 shop trong DB, `k` chênh nhau **hơn 4 lần**:
+
+| shop | `k` học được | số SKU góp | số ngày sale |
+|---|---|---|---|
+| `demoshop` | **0,9474** | 48 | 719 |
+| `simworld4` | 1,9088 | 79 | 797 |
+| `simworld1` | 2,1628 | 59 | 607 |
+| `elastest` | 3,0775 | 15 | 216 |
+| `simworld3` | 3,4020 | 37 | 407 |
+| `simworld2` | 3,4937 | 20 | 236 |
+| `bulktest` · `demo` · `seedtest` · `stafffull` | **4,0000** | 50 · 60 · 18 · 15 | 774 · 877 · 210 · 217 |
+
+> ⛔ **Bốn shop cuối KHÔNG "học ra 4,0" — chúng ĐỤNG TRẦN.** `K_MAX = 4.0` (`promo_uplift.py:30`) và bước cuối
+> kẹp `k = max(0, min(4, median))`. Con số 4,0000 tròn trịa ở bốn shop khác nhau là dấu hiệu bị cắt, không phải
+> trùng hợp. Tệ hơn: payload lưu trong DB **không ghi lại việc đã cắt**, nên người đọc không phân biệt được
+> *học-ra-4* với *bị-cắt-về-4*. Đây là một khuyết tật thật, đã đặt tên trong DB tri thức:
+> **`W-UPLIFT-K-CLAMP-SATURATED`**.
+
+#### Thuật toán, đúng 6 bước theo code
+
+| Bước | Việc | Dòng code |
+|---|---|---|
+| 1 | **Vứt mọi ngày hết hàng** (`stockout = true`) | `promo_uplift.py:75` |
+| 2 | Gom theo SKU; chia làm **ngày sale** (`promo_pct > 0`) và **ngày thường** (`promo_pct == 0`) | `:90-91` |
+| 3 | Loại SKU có **< 3 ngày sale** hoặc **< 7 ngày thường** | `:93-96` |
+| 4 | Mỗi SKU tính `implied_k = (bán_TB_ngày_sale / bán_TB_ngày_thường − 1) / mức_giảm_TB` | `:112` |
+| 5 | **Dưới 3 SKU sống sót ⇒ trả về `None`** (không đủ căn cứ, dùng hằng số 1,5) | `:121-122` |
+| 6 | `k = TRUNG VỊ` của các `implied_k`, kẹp vào `[0 ; 4]` | `:125-126` |
+
+Ba ngưỡng ở bước 3 và 5 (`3` ngày sale · `7` ngày thường · `3` SKU) đều là **chống nhiễu**: một SKU có đúng
+1 ngày sale mà hôm đó tình cờ bán gấp đôi sẽ đẻ ra `implied_k` khổng lồ và kéo lệch cả shop.
+
+**Vì sao bước 1 vứt ngày hết hàng?** Vì ngày hết hàng, con số bán ra bị tồn kho chặn — đúng chuyện đã học ở
+mục E. Nếu một đợt sale làm cháy hàng giữa chừng, ngày đó **bán ít đi** vì hết hàng chứ không phải vì sale
+không hiệu quả. Để nó vào sẽ dạy máy rằng *"giảm giá làm bán ít đi"*.
+
+#### Tính tay trên số thật — `demoshop`, 6 SKU đầu bảng chữ cái
+
+Mọi con số dưới đây đọc thẳng từ `demand_daily` (bỏ ngày hết hàng, đúng bước 1):
+
+| SKU | ngày sale | ngày thường | bán TB ngày thường | bán TB ngày sale | mức giảm TB | `implied_k` |
+|---|---|---|---|---|---|---|
+| `bh-bia-tiger` | 10 | 124 | 1,5968 | 2,4000 | 0,2280 | **2,2062** |
+| `bh-cafe-g7` | 10 | 124 | 2,6613 | 2,9000 | 0,1000 | **0,8969** |
+| `bh-dauan-neptune` | 13 | 121 | 1,6860 | 1,4615 | 0,3325 | **−0,4004** |
+| `bh-duong-bienhoa` | 12 | 122 | 1,6639 | 1,7500 | 0,2260 | **0,2289** |
+| `bh-mi-haohao` | 12 | 122 | 4,4836 | 6,5000 | 0,2490 | **1,8062** |
+| `bh-nuocmam-namngu` | 10 | 124 | 3,8629 | 4,1000 | 0,1750 | **0,3507** |
+
+Phép tính đầy đủ cho mì Hảo Hảo:
+
+```
+tỷ lệ bán tăng = 6,5000 / 4,4836        = 1,44975      (tăng 44,975 %)
+trừ 1                                    = 0,44975
+chia cho mức giảm TB                     = 0,44975 / 0,2490 = 1,80622
+```
+
+Đọc thành lời: *"Hảo Hảo giảm trung bình 24,9% thì bán tăng 45% ⇒ quy về 1% giảm giá thì bán tăng ~1,8%."*
+
+> 🔴 **Dòng thứ ba là dòng đáng học nhất: `implied_k` ÂM.** Dầu ăn Neptune ngày sale bán **1,46** cái, ngày
+> thường bán **1,69** — sale mà bán **ít hơn**. Nguyên nhân có thể là bất kỳ thứ gì code không nhìn thấy: đợt
+> sale rơi vào giai đoạn ế, đối thủ giảm sâu hơn, hoặc đơn giản là ngẫu nhiên trên một SKU bán lai rai.
+> Toàn shop có **5/48 SKU** mang `implied_k` âm, thấp nhất **−0,6633**; đầu kia có SKU tới **+5,3321**.
+
+#### Vì sao bước 6 lấy TRUNG VỊ, không lấy trung bình cộng?
+
+Đây là chỗ một dòng code chứa cả một quyết định kỹ thuật (`promo_uplift.py:125`):
+
+```python
+k = statistics.median(implied_ks)
+```
+
+| Phép | Với 48 SKU của `demoshop` | Vấn đề |
+|---|---|---|
+| Trung bình cộng | bị SKU **+5,33** và SKU **−0,66** kéo hai đầu | một SKU dị thường đủ sức lệch cả shop |
+| **Trung vị** (đang dùng) | **0,9474** | nửa số SKU cao hơn, nửa thấp hơn — vài ca dị thường **không** đổi được kết quả |
+
+Trung vị còn khiến việc kẹp `[0 ; 4]` ở bước 6 hầu như không phải hoạt động: nó chỉ chạm trần khi **quá nửa**
+số SKU của shop thật sự có uplift ≥ 4 (đúng ca 4 shop dữ liệu dựng sẵn ở bảng trên).
+
+#### `k` sống ở đâu, và ai đọc
+
+Không sống trong file cấu hình — sống trong DB, một dòng cho mỗi shop (`forecast_run.py:362-370`):
+
+```
+bảng kv_state · khoá "promo_uplift_k:demoshop"
+{"k": 0.947408367288503, "n_skus": 48, "n_promo_days": 719,
+ "computed_at": "2026-08-12T03:54:49.493831+00:00"}
+```
+
+Ba trường phụ tồn tại để **cãi lại được**: con số này dựa trên bao nhiêu SKU, bao nhiêu ngày sale, tính lúc nào.
+Một `k` học từ 3 SKU không đáng tin bằng `k` học từ 48 SKU, và payload nói thẳng ra điều đó.
+
+- **Ghi:** mỗi lượt `forecast_run`, học lại một lần cho mỗi shop rồi cache trong lượt (`forecast_run.py:1123`).
+- **Đọc:** đường request (`forecast:promo-preview`, forecast theo yêu cầu) đọc lại từ `kv_state`
+  (`_load_uplift_k`, `:374`) — học nặng thì để job nền làm, đường đọc chỉ tra bảng. Đúng nguyên tắc tầng 3/tầng 4.
+- **Hỏng thì sao:** `estimate_uplift_k` trả `None` (không đủ SKU) ⇒ **không ghi gì** vào DB và dùng `1.5`;
+  đọc lỗi cũng trả `1.5` (`:380-387`). Degrade có tên, không nổ.
+
+> ⚠ **`k` KHÔNG phải hằng số — nó TRÔI theo dữ liệu.** Đo thật cùng một shop trong cùng một ngày:
+> lúc 03:54 `k = 0,9474` (719 ngày sale) → lúc 06:26 chạy lại chính hàm đó cho **`k = 0,8584`** (710 ngày sale).
+> Cùng code, cùng shop, cách nhau 2,5 giờ, lệch **9,4%**. Câu chuyện đằng sau con số này là một **lỗi thật của
+> sản phẩm** mà chính buổi học hôm nay lôi ra — kể đầy đủ ở phần cuối bài.
+
+---
+
+### F.2 · "GỠ ẢNH HƯỞNG SALE RA KHỎI LỊCH SỬ" (deflate) — MỔ KỸ
+
+> ⚠ **Câu hỏi của học viên: "gỡ ảnh hưởng sale ra khỏi lịch sử là gì?"**
+
+#### Bệnh cần chữa: ĐẾM HAI LẦN
+
+Hình dung một SKU bán nền 3 cái/ngày. Trong 124 ngày lịch sử có 24 ngày chạy sale, những ngày đó bán 6 cái.
+
+Nếu **không** gỡ gì cả:
+
+```
+① Model học trên chuỗi có cả ngày sale  →  nó thấy mức nền "trung bình" bị đội lên  ≈ 3,6
+② Ngày sale tương lai lại được NHÂN thêm (1 + k·mức_giảm)                          × 1,23
+                                                                    ⇒ 4,4 thay vì 3,7
+```
+
+Ảnh hưởng của sale bị tính **hai lần**: một lần chìm trong mức nền, một lần nhân tường minh. Và ngày **thường**
+trong tương lai cũng bị thổi theo, vì mức nền đã cao sẵn. Đây là cái nối `W-BT23` trong code gọi là
+**"promo seam"** — đường nối giữa lịch sử và tương lai.
+
+#### Thuốc: chia ngược đúng cái đã nhân
+
+`_deflate_promo_units` (`forecast_run.py:436-453`) — toàn bộ phép chữa nằm trong một dòng:
+
+```python
+u = u / (1.0 + k * min(max(frac, 0.0), 1.0))       # frac = promo_pct / 100
+```
+
+Nó **đảo ngược** đúng công thức của mục F.1: nhân lên bằng `(1 + k·frac)` thì chia lại bằng `(1 + k·frac)`.
+Ngày không sale (`frac = 0`) thì thừa số là 1 — **không đụng gì tới nó**.
+
+`min(max(frac, 0), 1)` kẹp mức giảm vào `[0 ; 1]`: một payload khai `discount_pct = 150` sẽ không tạo ra
+thừa số quái đản; giảm quá 100% vô nghĩa về kinh tế.
+
+#### Tính tay trên số thật — `ld-srm-cerave`, đợt sale tháng 6
+
+SKU quen thuộc xuyên suốt bài này. Đợt sale 24,3% từ 02/06, và `k = 0,947408` của `demoshop`:
+
+```
+thừa số = 1 + 0,947408 × 0,243 = 1 + 0,230220 = 1,230220
+```
+
+| ngày | `promo_pct` | `adjusted_units` (cái đã bán) | **model thật sự học** |
+|---|---|---|---|
+| 02/06 | 24,3 | 3 | 3 / 1,23022 = **2,4386** |
+| 03/06 | 24,3 | 4 | 4 / 1,23022 = **3,2515** |
+| **04/06** | **24,3** | **8** | **8 / 1,23022 = 6,5029** |
+| 05/06 | 24,3 | 5 | 5 / 1,23022 = **4,0643** |
+| 06/06 | 24,3 | 5 | 5 / 1,23022 = **4,0643** |
+| 07/06 | 24,3 | 1 | 1 / 1,23022 = **0,8129** |
+
+Đọc dòng 04/06 thành lời: *"Hôm đó bán được 8 chai, nhưng đang giảm 24,3%. Nếu KHÔNG có sale thì ước chừng
+chỉ bán 6,5 chai — và 6,5 mới là con số model được phép coi là mức nền."*
+
+#### Cặp đối xứng: gỡ ở quá khứ, lắp lại ở tương lai
+
+| | Hàm | Phép | Chạy trên |
+|---|---|---|---|
+| **Gỡ** (bước 2) | `_deflate_promo_units` (`:436`) | **chia** cho `(1 + k·frac)` | mọi ngày **lịch sử** có sale |
+| **Lắp** (bước 5) | `_apply_promo_uplift` (`:307`) | **nhân** cả p10/p50/p90 với `(1 + k·frac)` | ngày **tương lai** đã lên lịch sale |
+
+Hai hàm này phải luôn đi cùng nhau. Gỡ mà quên lắp ⇒ mọi ngày sale tương lai bị dự báo hụt. Lắp mà quên gỡ ⇒
+đếm hai lần như trên. Trong code, `_apply_promo_uplift` còn **sắp lại thứ tự** ba phân vị sau khi nhân
+(`sort_quantiles`, `:328`) để không bao giờ có chuyện `p10 > p50`.
+
+> ⭐ **Ngoại lệ quan trọng: `lgbm_global` KHÔNG được nhân.** Điều kiện thật trong code là
+> `if promo and model_used != "lgbm_global"` (`forecast_run.py:1308`). Lý do: model học máy này nhận
+> `promo_pct` **làm đặc trưng đầu vào** — nó đã tự học ảnh hưởng của sale rồi. Nhân thêm lần nữa là đếm hai
+> lần, y hệt bệnh ở trên nhưng ở một chỗ khác. Ở mẻ `r_2026-08-12` của `demoshop`, `lgbm_global` phục vụ
+> **64/132 SKU** — tức gần một nửa số SKU đi đường "không nhân".
+>
+> Đây là cùng một loại cạm bẫy với `apply_calendar` ở mục H (lịch Tết cũng không nhân cho `lgbm_global`).
+> Quy tắc chung đáng thuộc: **mỗi ảnh hưởng chỉ được vào con số ĐÚNG MỘT LẦN, bằng đúng MỘT đường.**
+
+---
+
 <a id="g"></a>
 
 ## G · `forecasts` — TỪNG CỘT, ĐỌC MỘT DÒNG THẬT
@@ -1521,6 +1771,220 @@ So sánh với dòng `lgbm_global` sinh cùng lúc: `{"width_factor": 0.5, "empi
 > Đây là bằng chứng sống: **coverage cao không phải thành tích**. Hệ nhìn thấy 1,0 và phản ứng bằng cách **bóp khoảng lại**, chứ không đem khoe.
 
 `cold_start` thì `calibration` để **NULL** — SKU mới toanh, chưa có lịch sử để đo coverage nên không có gì để hiệu chỉnh. Trung thực: không đo được thì để trống, không bịa số.
+
+---
+
+### G.1 · MỔ TỪNG CỘT — schema thật, ví dụ thật, cạm bẫy
+
+> ⚠ **Câu hỏi của học viên: "cấu trúc bảng `forecasts` là gì, giải thích chi tiết từng field?"**
+> Đây là schema nguyên trạng, đọc bằng `\d forecasts` trên DB đang chạy lúc 2026-08-12 — **12 cột**, nhiều hơn
+> bảng tóm tắt phía trên vì bảng đó bỏ qua `id` và gộp vài cột.
+
+```
+                                       Table "public.forecasts"
+   Column    |           Type           | Nullable |                Default
+-------------+--------------------------+----------+---------------------------------------
+ id          | bigint                   | not null | nextval('forecasts_id_seq'::regclass)
+ project_id  | text                     | not null |
+ product_id  | text                     | not null |
+ run_id      | text                     | not null |
+ horizon_day | date                     | not null |
+ p10         | numeric                  |          |
+ p50         | numeric                  |          |
+ p90         | numeric                  |          |
+ model_used  | text                     |          |
+ data_window | text                     |          |
+ calibration | jsonb                    |          |
+ created_at  | timestamp with time zone | not null | now()
+Indexes:
+    "forecasts_pkey" PRIMARY KEY, btree (id)
+    "idx_forecasts_project_product_created" btree (project_id, product_id, created_at DESC)
+    "idx_forecasts_project_product_run"     btree (project_id, product_id, run_id)
+Policies:
+    POLICY "tenant_isolation" USING ((project_id = current_setting('app.project_id', true)))
+```
+
+Một dòng thật để bám theo suốt phần này — chính SKU CeraVe của bài, mẻ hôm nay:
+
+```
+id=…  project_id=demoshop  product_id=ld-srm-cerave  run_id=r_2026-08-12
+horizon_day=2026-08-13   p10=1,092   p50=3,033   p90=4,974
+model_used=autoets_theta_ensemble    data_window=2026-04-01..2026-08-12
+calibration={"width_factor": 0.6470024056079998, "empirical_coverage": 0.9523809523809523}
+created_at=2026-08-12 03:54:52+00
+```
+
+---
+
+**1. `id` · `bigint` · tự tăng · BẮT BUỘC**
+
+Số thứ tự dòng, Postgres tự cấp. Không mang nghĩa nghiệp vụ nào.
+
+> ⚠ **Chi tiết dễ bỏ qua nhưng quan trọng: khoá chính là `id`, KHÔNG phải bộ nghiệp vụ.**
+> Bảng `demand_daily` có `PRIMARY KEY (project_id, product_id, day)` nên DB **tự cấm** hai dòng cho cùng một
+> ngày. Bảng `forecasts` **không có** ràng buộc tương ứng trên `(project_id, product_id, run_id, horizon_day)`.
+> Nghĩa là **DB cho phép** hai dòng trùng — thứ giữ cho không trùng là **phần mềm**: `save_run` xoá sạch dòng
+> cùng `run_id` trước khi ghi (`store/forecasts.py:96-104`), cộng với **khoá tiến trình** `pg_advisory_lock`
+> theo từng shop (`forecast_run.py:1119`) chặn hai mẻ chạy đè nhau.
+> Đánh đổi: linh hoạt hơn (ghi lại mẻ cũ, chèn thủ công) nhưng **kỷ luật nằm ở code, không nằm ở DB** — mất
+> một lớp lưới an toàn so với `demand_daily`.
+
+---
+
+**2. `project_id` · `text` · BẮT BUỘC** — shop nào. Cùng vai trò cột cách ly như ở `demand_daily`, và cũng là
+cột mà `POLICY tenant_isolation` bám vào. Hai lớp khoá y hệt mục E.
+
+**3. `product_id` · `text` · BẮT BUỘC** — SKU nào. Cặp `(project_id, product_id)` là danh tính mặt hàng.
+
+---
+
+**4. `run_id` · `text` · BẮT BUỘC**
+
+**Số hiệu MẺ CHẠY.** Sinh bằng đúng một dòng (`forecast_run.py:1098`):
+
+```python
+run_id = "r_" + date.today().isoformat()        # -> "r_2026-08-12"
+```
+
+Ba tính chất rơi ra từ chính dòng đó:
+
+- **Cả mẻ dùng chung một `run_id`.** 133 SKU × 28 ngày = 3.724 dòng cùng mang `r_2026-08-12` ⇒ luôn tách được
+  *"số hôm nay"* với *"số hôm qua"*.
+- **Một ngày chỉ có một `run_id`.** Chạy lần thứ hai trong ngày ⇒ cùng tên ⇒ `save_run` xoá rồi ghi lại =
+  **ghi đè**, không nhân đôi.
+- **Không có giờ trong tên.** Muốn biết mẻ chạy lúc mấy giờ thì đọc `created_at`, không đọc `run_id`.
+
+---
+
+**5. `horizon_day` · `date` · BẮT BUỘC**
+
+⚠ **NGÀY ĐƯỢC DỰ BÁO — một ngày lịch thật, KHÔNG phải "ngày thứ mấy kể từ lúc chạy".** Đây là lỗi đọc phổ biến
+nhất ở bảng này. Mẻ 12/08 đẻ ra 28 dòng mang `horizon_day` = 13/08, 14/08, …, 09/09.
+
+Sinh ra ở `forecast_run.py:1319-1321`:
+
+```python
+for i, (p10, p50, p90) in enumerate(daily_raw[:HORIZON_DEFAULT]):
+    day = today + timedelta(days=i + 1)          # i+1: bắt đầu từ NGÀY MAI
+```
+
+`i + 1` nghĩa là **không bao giờ dự báo cho hôm nay** — hôm nay đã đang xảy ra, dự báo nó thì vô nghĩa.
+Tầm nhìn cố định **28 ngày** (`HORIZON_DEFAULT = 28`, `:43`) — khoảng 4 tuần, đủ cho một chu kỳ đặt hàng.
+
+---
+
+**6-7-8. `p10` · `p50` · `p90` · `numeric` · CÓ THỂ NULL**
+
+Ba phân vị của **cầu ngày đó**, đơn vị **cái**. Nghĩa xác suất đã mổ ở CỤM 2 mảnh 4.
+
+- **`numeric` chứ không phải `float`** — cùng lý do với `units_sold`: thập phân chính xác, không trôi số.
+- **Số lẻ là bình thường** (`p50 = 3,033`): đây là kỳ vọng của một biến ngẫu nhiên. Làm tròn là việc của người
+  đặt hàng ở bước cuối.
+- **Luôn thoả `p10 ≤ p50 ≤ p90`** — được ép bằng `sort_quantiles` sau mọi phép nhân (`:328`), không phải trông
+  chờ model tự ngoan.
+- **Cho phép NULL nhưng thực tế luôn có đủ ba** — model nào cũng phải trả về ba số; không có đường ghi thiếu.
+
+---
+
+**9. `model_used` · `text` · CÓ THỂ NULL**
+
+Model nào **thực sự** đẻ ra ba con số này — không phải model được *chọn*, mà model đã *chạy* (hai thứ có thể
+khác nhau: lgbm được chọn nhưng bundle chưa train xong thì rơi về đường thống kê).
+
+Phân bố thật của mẻ `r_2026-08-12` trên `demoshop`:
+
+| `model_used` | dòng | SKU | `calibration` NULL |
+|---|---|---|---|
+| `lgbm_global` | 1.792 | 64 | 0 |
+| `autoets_theta_ensemble` | 532 | 19 | 0 |
+| `cold_start` | 504 | 18 | **504 (toàn bộ)** |
+| `croston_auto` | 476 | 17 | 0 |
+| `seasonal_naive` | 252 | 9 | 28 (1 SKU) |
+| `imapa` | 84 | 3 | 0 |
+| `adida` | 56 | 2 | 0 |
+
+Đọc ra ba điều: (a) **một shop dùng 7 model cùng lúc** — mỗi SKU một bản chất thống kê khác nhau, đúng tinh
+thần §2; (b) `lgbm_global` phủ gần một nửa SKU; (c) **18 SKU vẫn là `cold_start`** — hàng mới, chưa đủ lịch sử.
+
+---
+
+**10. `data_window` · `text` · CÓ THỂ NULL**
+
+Cửa sổ dữ liệu model đã học, viết thành chuỗi `"ngày_đầu..ngày_cuối"` (`forecast_run.py:1326`):
+
+```
+2026-04-01..2026-08-12        →  134 ngày lịch sử
+```
+
+Nó lấy thẳng ngày đầu và ngày cuối của chuỗi `demand_daily` đã nạp (`series[0]["day"]`, `series[-1]["day"]`).
+
+> **Vì sao lưu một chuỗi thay vì hai cột `date`?** Đây là cột để **người đọc** truy vết, không phải để máy lọc.
+> Đánh đổi có thật: muốn hỏi *"mẻ nào học ít hơn 60 ngày"* thì phải cắt chuỗi — bất tiện. Đổi lại, thêm dạng
+> cửa sổ mới sau này (ví dụ có lỗ hổng ở giữa) không phải đổi schema.
+
+---
+
+**11. `calibration` · `jsonb` · CÓ THỂ NULL** — hai con số hiệu chỉnh, đã mổ kỹ ngay phía trên. Bổ sung ba điều
+về **khi nào nó NULL** (`forecast_run.py:1328-1333`):
+
+```python
+calibration = None
+if empirical_cov is not None:
+    calibration = {"empirical_coverage": empirical_cov, "width_factor": width_factor}
+```
+
+`empirical_coverage` chỉ có khi **backtest đã chấm SKU đó**. Nên `calibration IS NULL` đọc thành:
+*"SKU này chưa từng được backtest chấm"* — đúng 18 SKU `cold_start` (hàng mới, chưa đủ dữ liệu để backtest)
+cộng 1 SKU `seasonal_naive` (router tự chọn, backtest chưa tới lượt).
+
+**Cạm bẫy:** `calibration IS NULL` **không** có nghĩa "khoảng chuẩn". Nó nghĩa là **chưa ai đo** — mà chưa đo
+thì không biết khoảng rộng hay hẹp. Trung thực hơn là bịa `width_factor = 1.0`, nhưng người đọc phải hiểu đúng.
+
+---
+
+**12. `created_at` · `timestamptz` · BẮT BUỘC · mặc định `now()`**
+
+Lúc dòng được **ghi**. Khác `run_id` (chỉ có ngày) ở chỗ nó có giờ-phút-giây, và khác `horizon_day` (ngày được
+dự báo) hoàn toàn. Ba mốc thời gian trong cùng một dòng, đừng lẫn:
+
+| Cột | Trả lời câu |
+|---|---|
+| `run_id` = `r_2026-08-12` | mẻ **nào** |
+| `created_at` = 12/08 03:54:52 | ghi xuống **lúc nào** |
+| `horizon_day` = 13/08 | dự báo **cho ngày nào** |
+
+`created_at` cũng là cột mà chỉ mục `idx_forecasts_project_product_created` bám vào — đúng câu hỏi mà tầng 4
+hỏi mỗi lần có người gọi API: *"shop này, SKU này, mẻ mới nhất đâu?"*.
+
+---
+
+#### Bảng tra nhanh cả 12 cột
+
+| Cột | Kiểu | NULL? | Nghĩa một dòng | Ví dụ thật |
+|---|---|---|---|---|
+| `id` | bigint | không | số thứ tự, không nghĩa nghiệp vụ | — |
+| `project_id` | text | không | shop nào (cột cách ly + RLS) | `demoshop` |
+| `product_id` | text | không | SKU nào | `ld-srm-cerave` |
+| `run_id` | text | không | **mẻ chạy**, `r_` + ngày | `r_2026-08-12` |
+| `horizon_day` | date | không | **ngày được dự báo** (không phải offset) | `2026-08-13` |
+| `p10` | numeric | có | kịch bản ế | `1,092` |
+| `p50` | numeric | có | trung vị | `3,033` |
+| `p90` | numeric | có | kịch bản chuẩn bị hàng | `4,974` |
+| `model_used` | text | có | model **đã chạy** thật | `autoets_theta_ensemble` |
+| `data_window` | text | có | cửa sổ đã học, dạng chuỗi | `2026-04-01..2026-08-12` |
+| `calibration` | jsonb | **có** | 2 số hiệu chỉnh; NULL = **chưa backtest chấm** | `{"width_factor":0.647,…}` |
+| `created_at` | timestamptz | không | lúc ghi dòng | `2026-08-12 03:54:52+00` |
+
+#### Bảng này lớn cỡ nào, và ai dọn?
+
+Đo thật 2026-08-12: **277.487 dòng · 72 MB · 10 mẻ**.
+
+> 🔴 **Không ai dọn cả.** `save_run` chỉ xoá dòng **cùng `run_id`** (tức ghi đè mẻ trong ngày); không có vòng
+> nào xoá mẻ cũ. Trong khi đó bảng `job_runs` **có** vòng dọn riêng (`start_job_runs_retention_loop`,
+> `main.py:179`). Tức dự án đã biết làm retention — chỉ là chưa làm cho `forecasts`.
+> Phép tính tăng trưởng: `số SKU × 28 dòng × mỗi ngày một mẻ`. Với 1.793 SKU đang có, đó là **~50.000 dòng/ngày**
+> ⇒ khoảng **18 triệu dòng/năm**. Đã đặt tên trong DB tri thức: **`W-FORECASTS-NO-RETENTION`** (đang mở —
+> xoá dữ liệu là việc phải hỏi chủ dự án trước, không được tự quyết).
 
 ---
 
@@ -1911,8 +2375,143 @@ Nợ kèm theo, đã đặt tên `W-JOBRUNS-DURATION-ZERO`: `backtest_run.py` đ
 
 ---
 
-# KIỂM TRA BÀI 0 — 3 CÂU, TRẢ LỜI BẰNG SỐ CỦA CHÍNH DỰ ÁN
+# PHÁT SINH TRONG BUỔI HỌC (2) — NGÀY SALE BỊ XOÁ ÂM THẦM
+
+> Câu hỏi *"hệ số khuyến mãi của shop là gì?"* dẫn tới một lỗi sản phẩm thật, tìm ra **trong lúc soạn mục F.1**
+> của chính bài này. Đã vá và đã đo xong cùng ngày. Tên trong DB tri thức: **`W-ROLLUP-PROMO-WINDOW-ERASE`**.
+
+## Con số không khớp
+
+Đang viết mục F.1, tôi tái lập lại `k` của `demoshop` bằng SQL để đối chiếu với số đã lưu trong `kv_state`:
+
+| | `k` | số SKU | số ngày sale |
+|---|---|---|---|
+| Đã lưu trong DB, ghi lúc **03:54** | **0,947408** | 48 | **719** |
+| Chạy lại chính hàm đó lúc **06:26** | **0,858374** | 48 | **710** |
+
+Cùng shop, cùng code, cách nhau 2,5 giờ. **Chín ngày sale biến mất** và `k` tụt 9,4%.
+
+Bước đầu tiên là loại trừ khả năng SQL của tôi viết sai — chạy thẳng hàm thật của sản phẩm trong container:
+
+```
+estimate_uplift_k = {"k": 0.8583739626929002, "n_skus": 48, "n_promo_days": 710}
+```
+
+Khớp SQL tới chữ số thứ 12 ⇒ phép đo đúng, **dữ liệu thật sự đã đổi**.
+
+## Truy ra thủ phạm
+
+Nhìn một đợt sale cụ thể. Event khai giảm 21% cho phấn nước Clio, **từ 11/04 đến hết 15/04**:
+
+| ngày | 11/04 | 12/04 | 13/04 | **14/04** | **15/04** |
+|---|---|---|---|---|---|
+| `promo_pct` trong bảng | 21 | 21 | 21 | **0** | **0** |
+
+Đợt sale bị **cụt đuôi**. Và mốc cắt 120 ngày của rollup hôm đó rơi đúng vào **14/04**.
+
+Cơ chế, đọc thẳng từ code:
+
+1. Rollup chỉ đọc event trong cửa sổ `event_time >= now − 120 ngày` (`rollup.py:59-68`).
+2. Event `promo.scheduled` khai **một lần** ở đầu đợt, nhưng **sơn nhiều ngày về sau** (`:122-132`).
+3. Rollup ghi lại mọi ngày từ `min_day` của SKU tới hôm nay (`:158,167`) — với Clio, `min_day` đo được đúng
+   bằng **14/04**.
+4. UPSERT ghi đè thẳng: `promo_pct = EXCLUDED.promo_pct` (`:254`) — không phải `GREATEST`.
+
+Ghép lại: event khai ngày 11/04 đã **rơi khỏi cửa sổ**, nhưng hai ngày nó sơn (14, 15/04) **vẫn nằm trong tầm
+ghi lại** ⇒ rollup ghi đè chúng về 0. Rồi biên trôi qua, hai ngày đó **không bao giờ được ghi lại nữa** —
+**đóng băng sai vĩnh viễn**.
+
+Đếm toàn hệ trước khi vá: **55 ngày-SKU** mất sale — cụm dày đúng tại biên `now−120d` (14→18/04), cộng các cụm
+cũ đã đóng băng từ những lần biên quét trước (2025-07, 2026-03).
+
+## Vì sao nó nguy hiểm hơn vẻ ngoài
+
+Chuỗi hậu quả đi **xuôi** đúng những gì bài này đã dạy:
+
+```
+ngày sale bị xoá nhãn
+   → nó thành "ngày thường bán cao"
+   → base_mean (bán TB ngày thường) bị THỔI LÊN
+   → implied_k = (promo_mean/base_mean − 1)/mức_giảm  TỤT XUỐNG
+   → k của cả shop tụt
+   → mọi ngày sale TƯƠNG LAI bị dự báo HỤT
+   → khách nhập thiếu đúng vào đợt sale — lúc đông khách nhất
+```
+
+Không exception, không log đỏ, không cảnh báo. Chỉ là con số **xấu dần theo thời gian**. Đây đúng loại lỗi mà
+LUẬT-0 của dự án sinh ra để bắt: gate đo *hàm* thì vẫn xanh, vì mỗi hàm đều đúng.
+
+> **Câu hỏi của học viên đáng ghi lại: "thuật toán bị sai hay dữ liệu bị sai vậy?"**
+> **Thuật toán ghi dữ liệu sai ⇒ dữ liệu sai theo.** Ba tầng, phân định rạch ròi:
+>
+> | | Đúng hay sai | Bằng chứng |
+> |---|---|---|
+> | `estimate_uplift_k` (công thức học `k`) | **ĐÚNG** | vá xong nó trả lại **đúng từng bit** `0.947408367288503` / 719 ngày |
+> | `rollup.py` (code ghi dữ liệu) | **SAI** | đọc promo trong 120 ngày nhưng ghi lại xa hơn thế |
+> | `demand_daily` (dữ liệu) | **SAI — là hậu quả** | 55 ngày-SKU, và **đóng băng**, không tự lành |
+>
+> Model dự báo không hề sai — nó tính trung thực trên đầu vào đã hỏng. Bài học chung: **khi một con số suy ra
+> trông lạ, đừng sửa công thức trước; đi ngược về dữ liệu nuôi nó.**
+
+## Thuật toán đúng là gì
+
+Chỗ sai nằm ở **lệch đơn vị**, cùng họ với ba phép lệch đã học ở CỤM 1:
+
+> Cửa sổ `window_days` là tham số của **đường ĐỌC** (để khỏi quét lại cả bảng mỗi giờ), **không phải** định
+> nghĩa nghiệp vụ của một đợt sale. Tuổi của **EVENT** và tuổi của **NGÀY BỊ SƠN** là hai thứ khác nhau — lấy
+> tuổi event để quyết định ngày đó có sale hay không là **sai đơn vị**.
+
+Cách vá đã chọn: nạp **riêng** những promo cũ hơn cửa sổ, sơn vào một bản đồ riêng, và chỉ **hợp nhất lúc GHI**
+bằng `max()` — giữ đúng luật *"lấy sâu nhất"* của promo chồng nhau đã học ở mục 7b.
+
+⛔ **Và một điều tuyệt đối không được làm**, đáng học ngang bản vá: **không** được đưa những ngày promo cũ đó
+vào tập tính `min_day`. Nếu đưa, `min_day` lùi về quá khứ ⇒ rollup ghi lại những ngày mà **purchase event của
+chúng đã ngoài cửa sổ** ⇒ `units.get(key, 0)` trả 0 ⇒ **xoá sạch doanh số cũ**. Đó đúng là tai nạn SIM-WORLD
+SW-1 đã ghi trong docstring của chính hàm này. Sửa một lỗi im lặng bằng cách tạo ra một lỗi im lặng to hơn là
+lối mòn rất dễ sa vào.
+
+Hai phương án bị loại, viết ra để sau này khỏi thử lại:
+
+| Phương án loại | Vì sao sai |
+|---|---|
+| Nới `window_days` cho **mọi** thứ | `min_day` lùi theo ⇒ xoá sạch doanh số cũ (đúng tai nạn SW-1) |
+| `GREATEST` trong UPSERT (promo không bao giờ giảm) | không bao giờ **sửa** được khai nhầm, và phá luật `max` theo từng ngày |
+
+Kèm theo bản vá: kill-switch `ROLLUP_PROMO_FULL_HISTORY=0` trả về hành vi cũ không cần build lại · trần
+`MAX_PROMO_SPAN_DAYS = 400` chặn payload lỗi làm nở vòng lặp ngày · fail-open nếu đường đọc phụ hỏng (rollup
+degrade đúng bằng hành vi cũ, không bao giờ chết) · thêm số đếm `promo_carried` trong kết quả để **hỏng thì
+biết bằng số**.
+
+## Đã đo sau khi vá — 2026-08-12
+
+| Phép đo | Trước | Sau |
+|---|---|---|
+| Ngày sale bị xoá (11 tenant) | **55** | **0** |
+| `k` của `demoshop` | 0,858374 (710 ngày) | **0,947408367288503 (719 ngày)** — đúng từng bit giá trị gốc |
+| `k` của `simworld2` | 2,9944 | **3,4937** (+16,7%) |
+| `k` của `simworld1` | 2,0735 | **2,1628** |
+| Test `tests/forecast/test_rollup.py` | 4 pass | **7 pass** (+3, có 1 test **tự-phá**) |
+| Toàn suite `tests/forecast` | — | **282 pass / 0 fail** |
+
+Test tự-phá tên `test_promo_carry_is_caused_by_the_gate_not_by_luck`: cùng dữ liệu đó, tắt kill-switch thì
+`promo_pct` **về 0 trở lại** — chứng minh việc sửa được là **do bản vá**, không phải do may. Gate không tự phá
+được thì gate không tồn tại.
+
+> **Điều đáng nhớ nhất của ca này:** con bug lộ ra không phải nhờ test, không phải nhờ alert, mà nhờ **một câu
+> hỏi của học viên** buộc người viết tài liệu phải **tự tính lại một con số bằng tay** rồi đối chiếu với số hệ
+> thống tự khai. Đó chính là "phân tích ngược" trong LUẬT-0, làm thủ công.
+
+---
+
+# KIỂM TRA BÀI 0 — 7 CÂU, TRẢ LỜI BẰNG SỐ CỦA CHÍNH DỰ ÁN
 
 1. Khách hỏi: *"Sao không chạy backtest mỗi ngày cho model luôn tươi?"* — trả lời bằng **đánh đổi** kèm con số chu kỳ, và nói rõ backtest ghi cái gì vào đâu.
 2. Một SKU đang được phục vụ bởi `croston`. Muốn biết **vì sao là croston** chứ không phải router chọn — tìm ở bảng nào, key nào?
 3. Tầng 4 (API đọc) có được phép gọi model để tính lại dự báo không? Trả lời có/không **và** hai hệ quả nghiệp vụ của thiết kế đó: một tốt, một xấu.
+
+**Ba câu mới, theo mục F và G (thêm 2026-08-12):**
+
+4. Shop A có `k = 0,95`, shop B có `k = 3,49`. Cùng giảm **20%** cho một SKU mà mức nền là 10 cái/ngày — mỗi shop dự báo bán bao nhiêu vào ngày sale? Viết ra **phép tính**, rồi nói con số nào **đáng nghi** và vì sao (gợi ý: nhìn lại bảng 10 shop ở F.1).
+5. Một SKU ngày sale bán được **8** cái, đang giảm **24,3%**, shop có `k = 0,947`. Model được cho học con số nào? **Vì sao không cho nó học thẳng số 8?** Nếu bỏ hẳn bước này thì dự báo sai theo hướng nào — cao lên hay thấp đi?
+6. Mở bảng `forecasts` thấy một dòng `calibration IS NULL`. Đọc ra được điều gì về SKU đó? Và vì sao để **trống** lại trung thực hơn là điền `width_factor = 1.0`?
+7. Ba mốc `run_id = r_2026-08-12` · `horizon_day = 2026-08-13` · `created_at = 12/08 03:54` khác nhau chỗ nào? Nếu chạy job **thêm một lần nữa lúc 15:00 cùng ngày** thì bảng có thêm bao nhiêu dòng — và vì sao?
