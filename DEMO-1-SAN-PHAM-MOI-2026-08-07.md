@@ -7,6 +7,17 @@
 > (chứng minh dữ liệu đã đổi) → ④ **LUỒNG** (dữ liệu chảy qua bảng nào, job nào).
 > Đây là thứ biến buổi demo từ *"tin tôi đi"* thành *"anh chị tự nhìn số"*.
 
+---
+## ⛔⛔ LUẬT NGHIỆM THU (human chốt 2026-08-12) — ĐỌC TRƯỚC KHI NÓI "XONG"
+**Hai kịch bản này chỉ được coi là HOÀN THIỆN khi chạy end-to-end đủ 4 LƯỢT LIÊN TIẾP không ra lỗi,
+trên CÙNG MỘT BẢN CODE.** Deploy bất kỳ thay đổi nào ở giữa ⇒ 4 lượt trước đó mất giá trị, **đếm lại từ 1**.
+
+*Vì sao:* một lượt không đủ để lộ lỗi phụ thuộc trạng thái. Đo 12/08: lượt 1 xanh, **lượt 2 mới lộ** việc
+`reset1` xoá sản phẩm là xoá luôn vector ⇒ `[06]` rỗng ⇒ `[07]` ra 404 thay vì `cold_start_analog`.
+Lượt 1 chỉ xanh vì vector còn sót từ lần chạy trước.
+
+**Log mỗi lượt lưu ở `icpp/demo-e2e-runs/`** (ngoài repo) — để mất ngữ cảnh phiên vẫn còn bằng chứng.
+
 ## THÔNG ĐIỆP BÁN HÀNG CỦA MÀN NÀY
 Hàng mới lên kệ **tìm được sau vài giây**. Khi chưa có lịch sử bán, hệ **không bịa số** — nó nói rõ đang
 **mượn lịch sử của 5 mặt hàng tương tự nào**, và **từ chối thẳng** việc khuyên giá vì thiếu doanh số. Sau khi
@@ -127,6 +138,31 @@ thấy hàng đợi lên 1 rồi về 0."*
 until curl -s localhost:16021/v1/ask -H "Authorization: Bearer $SKEY" -H "X-Project-Id: demoshop" -H "Content-Type: application/json" -d '{"question":"co mi omachi khong?"}' | grep -q demo-mi-omachi; do echo "dang danh chi muc..."; sleep 3; done; echo "== DA SAN SANG =="
 ```
 > Không đếm nhẩm — đo bằng máy. Hỏi `/v1/ask` quá sớm sẽ ra hàng lung tung.
+
+### ⛔⛔ CỔNG THỨ HAI — KÍCH VECTOR (🆕 12/08, **bỏ qua là hỏng màn 2**)
+Chỉ mục chữ (BM25) có ngay, nhưng **vector ngữ nghĩa** do job `embed_backfill` sinh, chạy mỗi **300 giây**.
+Chưa có vector thì `[06] similar-products` trả **rỗng** ⇒ `[07]` ra **404** thay vì `cold_start_analog` —
+đúng mắt xích đắt nhất của màn 2. (Đo 12/08: chạy lại kịch bản lần 2 vấp đúng chỗ này, vì `reset1` xoá sản
+phẩm là xoá luôn vector.)
+
+```bash
+docker exec miniai-smartsearch python3 -c "
+import asyncio, asyncpg, os
+from app.jobs.embed_backfill import run_embed_backfill_once
+from app.core.embedding import BgeM3Embedder
+from app.store.vespa_client import VespaClient
+async def m():
+    p = await asyncpg.create_pool(os.environ.get('SEARCH_DSN') or os.environ.get('DATABASE_URL'), min_size=1, max_size=2)
+    v = VespaClient(os.environ.get('VESPA_URL','http://vespa:8080'))
+    print('embed job:', await run_embed_backfill_once(p, v, BgeM3Embedder()))
+    await p.close()
+asyncio.run(m())"
+
+# đo bằng máy: phải thấy 5 hàng xóm, KHÔNG được rỗng
+until curl -s "localhost:16021/internal/similar-products?project_id=demoshop&product_id=demo-mi-omachi&k=5" -H "X-Internal-Token: $ITOK" | grep -q product_id; do echo "dang sinh vector..."; sleep 3; done; echo "== VECTOR DA SAN SANG =="
+```
+**Đo thật 12/08:** `embed job: {'embedded': 1}` → similar-products trả 5 SKU.
+*"Đây cũng là một nhịp job nền — ngoài đời tự chạy mỗi 5 phút, ở đây tôi kích tay cho nhanh."*
 
 ---
 # MÀN 2 — TÌM ĐƯỢC NGAY, NHƯNG CHƯA CÓ TRÍ KHÔN (6 API)
@@ -519,7 +555,20 @@ print(json.dumps({"events":ev}))
 PY
 )" | .venv/bin/python -m json.tool
 ```
-**OUTPUT thật:** `{"accepted": 24, "deduped": 0, "skipped": 0, "errors": [], "conflicted": 0}`
+**OUTPUT thật:** `{"accepted": 3, "deduped": 21, "skipped": 0, "errors": [], "conflicted": 0}`
+
+> 🆕 **Vì sao `accepted` chỉ là 3 chứ không phải 24 — và đây là ĐIỂM KHOE, không phải lỗi** (đo 12/08).
+> 21 đơn hàng ở bước [09] gửi vào **forecast**, nhưng `purchase.completed` là loại sự kiện **cả decision
+> cũng tiêu thụ**, nên chúng đã tự sang decision qua **sổ cái chung + projector**. Lần gửi này chỉ còn 3 sự
+> kiện mới (giá vốn · giá · tồn kho), 21 cái kia bị nhận ra là trùng.
+> Kiểm ngay bằng SQL — bảng vẫn đủ 24 dòng:
+> ```bash
+> q miniai_decision "SELECT event_type, count(*) FROM raw_events WHERE project_id='demoshop' AND payload::text LIKE '%demo-mi-omachi%' GROUP BY 1 ORDER BY 2 DESC;"
+> ```
+> **Đo thật:** `purchase.completed=21 · cost.recorded=1 · price.changed=1 · stock.level=1`.
+> *"Anh chị vừa thấy một sự kiện gửi vào một service tự chảy sang service khác cần nó — và không bị đếm hai lần."*
+> ⚠ Nếu projector **chưa kịp** chạy thì con số sẽ là `accepted: 24, deduped: 0` — cả hai đều đúng, đừng đọc
+> thuộc số.
 
 > ⛔ **`stock.level` PHẢI dùng thời điểm HIỆN TẠI (`$EVT`), không được dùng ngày tương lai.**
 > Đo thật 12/08: bản trước ghi `event_time: "2026-08-13"` (ngày mai) ⇒ `state_rollup` **bỏ qua**, và
@@ -712,10 +761,11 @@ curl -s -X POST localhost:16022/v1/decisions:run -H "Authorization: Bearer $DKEY
 **OUTPUT thật 12/08** (số sẽ đổi theo ngày)
 ```json
 {"created": 2, "skipped_dedup": 149,
- "skipped_by_reason": {"anti_oscillation": 142, "plan_conflict": 84,
-                       "insufficient_history": 2, "no_stock": 2, "no_cost": 57},
- "superseded_plan": 1}
+ "skipped_by_reason": {"anti_oscillation": 143, "plan_conflict": 83,
+                       "insufficient_history": 2, "no_stock": 2, "no_cost": 63},
+ "superseded_plan": 0, "price_hold": 1, "anti_osc_hold": 1}
 ```
+> 🆕 Có thêm 2 trường `price_hold` / `anti_osc_hold` — số lời khuyên "giữ giá" và số ca bị khoá vì vừa đổi giá.
 
 ### ③ ĐO SAU
 ```bash
@@ -740,19 +790,22 @@ q miniai_decision "SELECT decision_id, kind, status FROM decisions WHERE project
 ---
 ## [16] GET /v1/decisions — danh sách lời khuyên
 
-### ② GỌI API
+### ② GỌI API — 🆕 lọc thẳng theo SKU (vá 12/08)
 ```bash
-curl -s "localhost:16022/v1/decisions?page_size=50" -H "Authorization: Bearer $DKEY" -H "X-Project-Id: demoshop" | .venv/bin/python -c "
+curl -s "localhost:16022/v1/decisions?product_id=demo-mi-omachi&page_size=50" -H "Authorization: Bearer $DKEY" -H "X-Project-Id: demoshop" | .venv/bin/python -c "
 import json,sys
-for x in json.load(sys.stdin)['items']:
-    if 'demo-mi-omachi' in json.dumps(x): print(x['decision_id'],'|',x['kind'],'|',x['status'])"
+for x in json.load(sys.stdin)['items']: print(x['decision_id'],'|',x['kind'],'|',x['status'])"
 ```
+**OUTPUT thật 12/08:** đúng **2 dòng** — `price_hold` và `replenishment_advice`, không lẫn SKU nào khác.
 
 ### ③ ĐO SAU — đối chiếu API với kho (phải khớp)
 ```bash
 q miniai_decision "SELECT decision_id, kind, status, presentable FROM decisions WHERE project_id='demoshop' AND subject_id='$SKU' ORDER BY created_at DESC;"
 ```
-⚠ **Không có tham số `product_id`** trên API này — muốn lọc theo SKU thì lọc phía client (đã ghi ở phụ lục lỗi).
+> 🆕 **Đã vá 12/08:** trước đây `?product_id=` bị **bỏ qua im lặng** (FastAPI lờ mọi query param không khai
+> báo) nên API trả nguyên danh sách cả shop trong khi người gọi tưởng đã lọc — phải lọc tay phía client.
+> Nay `product_id` là bí danh của `subject_id` và lọc thật; truyền cả hai mà khác giá trị thì báo lỗi 400
+> thay vì tự chọn hộ.
 
 ### ④ Mỗi lời khuyên gồm
 | Trường | Nghĩa |
@@ -888,9 +941,13 @@ q miniai_decision "SELECT count(*) AS so_phan_hoi FROM feedback WHERE project_id
 q miniai_decision "SELECT decision_id||' | '||action||' | '||coalesce(outcome_note,'(khong ghi chu)') FROM feedback WHERE project_id='demoshop' ORDER BY ts DESC LIMIT 1;"
 q miniai_decision "SELECT status FROM decisions WHERE decision_id='$DID';"
 ```
-**Đo thật 12/08:** `feedback 40 → 41`, dòng mới đúng `decision_id` vừa phản hồi, `decisions.status = accepted`.
+**Đo thật 12/08:** `feedback +1`, dòng mới đúng `decision_id` vừa phản hồi, `decisions.status = accepted`,
+và `outcome_note = "demo doi tac"` — **ghi chú của chủ shop được lưu**.
 > ⚠ Dùng `coalesce(...)` như trên — nối chuỗi với cột NULL trong Postgres cho ra **NULL**, tức dòng in ra
 > **rỗng trơn** và trông như lệnh hỏng (bản trước vấp đúng chỗ này).
+> 🆕 **Đã vá 12/08:** trường `note` (đúng thứ mọi ví dụ ở đây gửi) trước kia bị **nuốt im lặng** — handler
+> chỉ đọc `outcome_note`, nên API vẫn trả 200, dòng feedback vẫn vào bảng, **chỉ mất chữ**. Nay `note` là bí
+> danh hợp lệ; gửi cả hai tên với giá trị khác nhau thì báo 400 thay vì tự chọn hộ.
 
 ### ④ LUỒNG — vòng khép kín
 ```

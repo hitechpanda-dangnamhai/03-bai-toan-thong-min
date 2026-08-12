@@ -6,6 +6,10 @@
 >
 > ⭐ **MỖI API ĐỀU CÓ 4 BƯỚC:** ① **ĐO TRƯỚC** → ② **GỌI API** → ③ **ĐO SAU** (chứng minh dữ liệu đã đổi)
 > → ④ **LUỒNG** (dữ liệu chảy qua bảng nào, job nào).
+>
+> ⛔ **LUẬT NGHIỆM THU (human chốt 2026-08-12):** hai kịch bản chỉ HOÀN THIỆN khi chạy end-to-end đủ
+> **4 LƯỢT LIÊN TIẾP** không lỗi, trên **cùng một bản code**; deploy giữa chừng ⇒ **đếm lại từ 1**.
+> Log mỗi lượt lưu ở `icpp/demo-e2e-runs/`. Xem giải thích đầy đủ ở đầu **DEMO-1**.
 
 ## THÔNG ĐIỆP BÁN HÀNG CỦA MÀN NÀY
 Cùng bộ API đó, trên sản phẩm đã bán 4 tháng: hệ **không còn phải mượn** gì cả — độ co giãn giá ước lượng
@@ -327,14 +331,18 @@ print('run_id     =', d['run_id']); print('model_used =', d['model_used']); prin
 print('calibration=', json.dumps(d['calibration']))
 print('3 ngay dau =', [(x['day'][5:], round(x['p10'],2), round(x['p50'],2), round(x['p90'],2)) for x in d['daily'][:3]])"
 ```
-**OUTPUT thật 12/08**
+**OUTPUT thật 12/08** (đo lại sau bản vá chiều 12/08)
 ```
 run_id     = r_2026-08-12
 model_used = lgbm_global
-data_window= 2026-04-01..2026-08-12
+data_window= 2026-04-01..2026-08-11     ← kết ở HÔM QUA, xem ghi chú dưới
 calibration= {"width_factor": 1.2004, "empirical_coverage": 0.7143}
 3 ngay dau = [('08-13', 1.65, 3.93, 7.69), ('08-14', 1.59, 4.19, 7.59), ('08-15', 1.42, 5.09, 8.25)]
 ```
+> 🆕 **`data_window` kết ở HÔM QUA chứ không phải hôm nay — và đó là điểm đúng đắn** (vá 12/08).
+> `rollup` sinh dòng cho cả ngày hôm nay, mà ngày đó **chưa đóng sổ** (9 giờ sáng mới có doanh số 9 tiếng).
+> Trước bản vá, mẫu mùa vụ lấy nhầm ngày dở dang nên **cứ 7 ngày dự báo có 1 ngày bị ép xuống gần 0**.
+> *"Hệ chỉ học từ những ngày đã chốt sổ — hôm nay còn đang bán thì chưa tính."*
 ### ③ ĐO SAU — **API trả đúng số trong bảng**
 ```bash
 q miniai_forecast "SELECT horizon_day, round(p10,2), round(p50,2), round(p90,2) FROM forecasts WHERE project_id='demoshop' AND product_id='$SKU' ORDER BY horizon_day LIMIT 3;"
@@ -343,7 +351,7 @@ q miniai_forecast "SELECT horizon_day, round(p10,2), round(p50,2), round(p90,2) 
 ### ④ Điểm khoe
 - `model_used = lgbm_global` — SKU này được **chấm điểm và chọn** mô hình LightGBM quantile, không phải
   dùng một mô hình cho tất cả. Hệ có **thang 9 mô hình**.
-- `data_window = 2026-04-01..2026-08-12` — **học trên 134 ngày** (DEMO-1 hàng mới: `null`).
+- `data_window = 2026-04-01..2026-08-11` — **học trên 133 ngày đã chốt sổ** (DEMO-1 hàng mới: `null`).
 - `calibration.empirical_coverage = 0.7143` — hệ **đo được** khoảng của nó bao 71,4% thực tế (hứa 80%),
   nên `width_factor = 1.20` **nới khoảng ra** cho trung thực. *"Nó tự biết mình đang hẹp và tự sửa."*
 
@@ -620,7 +628,8 @@ bundle_price=130000 voucher=7000 …; EV = 0.15*44*(33466+8474) = 276807
 ### ④ Nói với khách
 *"**Toàn bộ phép tính viết ra bằng chữ** — chủ shop tự kiểm được từng bước, không phải hộp đen. Anh chị vừa
 thấy cả ngưỡng (`>=2.0`, `>=5`, `>15%`) lẫn phép nhân cuối cùng."*
-⚠ **Không có tham số `product_id`** — lọc phía client.
+🆕 **Lọc theo SKU được rồi** (vá 12/08): `?product_id=bh-mi-haohao`. Trước đây tham số này bị **bỏ qua im
+lặng** nên phải lọc tay phía client.
 
 ---
 ## [26] GET /v1/decisions:stats — thống kê + tỷ lệ chấp nhận
@@ -803,7 +812,9 @@ anh chị đều đã tự truy vấn thẳng vào cơ sở dữ liệu để đ
 | `purchase.completed` | `order_id`/`quantity`/`price` → từ chối | **`order_ref`** + **`qty`**, **`unit_price`** |
 | `stock.level` | `on_hand` → từ chối | **`on_hand_qty`** |
 | `cost.recorded` | thiếu `qty` → từ chối | `{product_id, unit_cost, qty}` |
-| `/v1/decisions?product_id=` | tham số **bị bỏ qua âm thầm** | lấy danh sách rồi lọc phía client |
+| `/v1/decisions?product_id=` | ~~bị bỏ qua âm thầm~~ **ĐÃ VÁ 12/08** | `?product_id=` lọc thật (bí danh của `subject_id`) |
+| `:feedback` body | ~~`note` bị nuốt~~ **ĐÃ VÁ 12/08** | `note` hoặc `outcome_note` đều được lưu |
+| DEMO-1 sau `reset1` | gọi `[06]/[07]` ngay → similar rỗng → **404** | **kích job embedding** rồi mới đi tiếp (cổng thứ hai ở DEMO-1) |
 | `make check-apis PROJECT=` | `PROJECT=forecast` (tên service) | **`PROJECT=demoshop`** (mã shop) |
 
 **Lưu ý:** mọi thông báo lỗi đều nói **đích danh trường sai** — lỡ gõ sai, cứ **đọc to thông báo lỗi**,
