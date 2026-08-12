@@ -1,7 +1,11 @@
 # DEMO 1 — SẢN PHẨM MỚI TINH: từ 0 dữ liệu đến ra quyết định
 > Kịch bản 20 API, chạy trọn 1 vòng: **smart search → recommend → forecast → decision → phản hồi**.
-> **Số liệu đo lại toàn bộ ngày 2026-08-12** trên demoshop (bản trước đo 07/08 đã lệch — xem mục
-> "ĐÃ ĐỔI SO VỚI BẢN 07/08" ở cuối file).
+> **Số liệu đo lại 2026-08-12, rà và vá lại 2026-08-13** trên demoshop sau một lượt chạy trọn 20/20 API —
+> xem mục **"VÁ NGÀY 13/08"** (15 lỗi tài liệu) và "ĐÃ ĐỔI SO VỚI BẢN 07/08" ở cuối file.
+>
+> ⚠ **LUẬT ĐỌC SỐ:** mọi con số in trong file là **ảnh chụp của một lần đo**, không phải hằng số.
+> Các bảng chỉ-ghi-thêm (`reco_exposure`, `raw_events`, `suggest_terms.weight`, số `job_run`) **lớn dần
+> mỗi ngày. LUÔN ĐỌC TỪ MÀN HÌNH**, chỉ đối chiếu **hiệu số** và **hình dạng** kết quả.
 >
 > ⭐ **MỖI API ĐỀU CÓ 4 BƯỚC:** ① **ĐO TRƯỚC** (chụp trạng thái) → ② **GỌI API** → ③ **ĐO SAU**
 > (chứng minh dữ liệu đã đổi) → ④ **LUỒNG** (dữ liệu chảy qua bảng nào, job nào).
@@ -22,6 +26,167 @@ Lượt 1 chỉ xanh vì vector còn sót từ lần chạy trước.
 Hàng mới lên kệ **tìm được sau vài giây**. Khi chưa có lịch sử bán, hệ **không bịa số** — nó nói rõ đang
 **mượn lịch sử của 5 mặt hàng tương tự nào**, và **từ chối thẳng** việc khuyên giá vì thiếu doanh số. Sau khi
 nạp 21 ngày dữ liệu thật, cũng những API đó trả lời đầy đủ và **tự khai đang dùng phương pháp nào, tin tới đâu**.
+
+---
+# 🗺️ BẢN ĐỒ 20 API — ĐỌC TRƯỚC KHI CHẠY
+
+## 1. Câu chuyện tổng: một thùng mì đi qua 4 màn
+
+```mermaid
+flowchart TB
+    subgraph M1["MÀN 1 — KHAI SINH (1 API)"]
+        A01["[01] products:upsert<br/>đưa hàng lên kệ"]
+    end
+
+    subgraph M2["MÀN 2 — TÌM ĐƯỢC, CHƯA CÓ TRÍ KHÔN (7 API)"]
+        A02["[02] search<br/>tìm thấy chưa?"]
+        A03["[03] suggest<br/>gợi ý gõ phím"]
+        A04["[04] recommend<br/>hàng liên quan"]
+        A05["[05] ask<br/>hỏi tự nhiên"]
+        A06["[06] similar-products<br/>hàng xóm gần nhất"]
+        A07["[07] forecast:query<br/>⚠ MƯỢN của 5 hàng xóm"]
+        A08["[08] price-preview<br/>❌ 412 thiếu doanh số"]
+    end
+
+    subgraph M3["MÀN 3 — NẠP DỮ LIỆU THẬT (2 API + 1 lệnh)"]
+        A09["[09] events:backfill → forecast<br/>21 ngày bán"]
+        A10["[10] events:backfill → decision<br/>vốn · giá · tồn"]
+        AOP["[vận hành] kích rollup<br/>sự kiện → chuỗi ngày"]
+    end
+
+    subgraph M4["MÀN 4 — ĐÃ CÓ TRÍ KHÔN (10 API)"]
+        A11["[11] forecast:run<br/>202 nhận việc"]
+        A12["[12] projections/status<br/>chờ job xong"]
+        A13["[13] forecast:query<br/>✅ số CỦA CHÍNH NÓ"]
+        A14["[14] scenarios:build<br/>128 kịch bản"]
+        A15["[15] decisions:run<br/>bộ não quyết định"]
+        A16["[16] GET decisions<br/>danh sách lời khuyên"]
+        A17["[17] price-preview<br/>✅ giờ trả lời được"]
+        A18["[18] price-preview dưới vốn<br/>🛑 BELOW_COST FAIL"]
+        A19["[19] replenish-plan<br/>nhập bao nhiêu"]
+        A20["[20] feedback<br/>chủ shop phán"]
+    end
+
+    A01 --> A02 --> A03 --> A04 --> A05 --> A06 --> A07 --> A08
+    A08 -->|"thiếu dữ liệu ⇒ đi nạp"| A09
+    A09 --> A10 --> AOP --> A11 --> A12 --> A13 --> A14
+    A14 --> A15 --> A16 --> A17 --> A18 --> A19 --> A20
+    A07 -.->|"cùng API, khác câu trả lời"| A13
+    A08 -.->|"cùng API, 412 → có số"| A17
+```
+
+⭐ **Hai đường nét đứt là toàn bộ thông điệp của buổi demo:** cùng một API, gọi trước và sau khi có dữ liệu,
+cho hai câu trả lời khác hẳn — **và hệ tự khai mình đang ở đâu**.
+
+## 2. Bảng chức năng 20 API
+
+| # | API | Cổng | Trả lời câu hỏi gì | Ghi/Đọc |
+|---|---|---|---|---|
+| **[01]** | `POST /v1/products:upsert` | 16021 | *"Đưa hàng mới lên kệ"* | **GHI** `products` + xếp hàng `catalog_outbox` |
+| **[02]** | `POST /v1/search` | 16021 | *"Khách gõ 'omachi' có ra hàng không?"* | đọc Vespa · **GHI** `query_log` |
+| **[03]** | `GET /v1/suggest` | 16021 | *"Gõ 2 chữ, gợi ý gì?"* | đọc `suggest_terms` |
+| **[04]** | `POST /v1/recommend` | 16021 | *"Trang sản phẩm nên gợi thêm gì?"* | **GHI** `reco_exposure` (kèm vị trí) |
+| **[05]** | `POST /v1/ask` | 16021 | *"Shop có bán mì ăn liền không?"* | đọc · **GHI** `query_log` |
+| **[06]** | `GET /internal/similar-products` | 16021 | *"Món nào giống món này nhất?"* — **API nội bộ** | đọc vector Vespa |
+| **[07]** | `POST /v1/forecast:query` | 16023 | *"Tháng tới bán bao nhiêu?"* → **mượn hàng xóm** | chỉ đọc, **không ghi** |
+| **[08]** | `POST /v1/decisions:price-preview` | 16022 | *"Giảm giá xuống 129k được không?"* → **412** | chỉ đọc |
+| **[09]** | `POST /v1/events:backfill` | 16023 | *"Đây là 21 ngày tôi đã bán"* | **GHI** `raw_events` |
+| **[10]** | `POST /v1/events:backfill` | 16022 | *"Đây là vốn, giá, tồn kho của tôi"* | **GHI** `raw_events` |
+| **[11]** | `POST /v1/forecast:run` | 16023 | *"Tính lại dự báo đi"* → **202 nhận việc** | **GHI** `job_run` |
+| **[12]** | `GET /v1/projections/status` | 16023 | *"Việc chạy xong chưa?"* | đọc `job_run` |
+| **[13]** | `POST /v1/forecast:query` | 16023 | như `[07]` → **giờ có số của chính nó** | chỉ đọc `forecasts` |
+| **[14]** | `POST /v1/scenarios:build` | 16023 | *"Dựng 128 thế giới có thể xảy ra"* | **GHI** `scenario_manifest` + 2 tệp `.npz` |
+| **[15]** | `POST /v1/decisions:run` | 16022 | *"Quét cả shop, có gì cần khuyên không?"* | **GHI** `decisions` |
+| **[16]** | `GET /v1/decisions` | 16022 | *"Cho tôi xem các lời khuyên"* | đọc `decisions` |
+| **[17]** | `POST /v1/decisions:price-preview` | 16022 | như `[08]` → **giờ trả lời được** | chỉ đọc |
+| **[18]** | `POST /v1/decisions:price-preview` | 16022 | *"Bán 80k được không?"* → **FAIL dưới vốn** | chỉ đọc |
+| **[19]** | `GET /v1/decisions:replenish-plan` | 16022 | *"Khi nào đặt hàng, đặt bao nhiêu?"* | đọc + in **công thức** |
+| **[20]** | `POST /v1/decisions/{id}:feedback` | 16022 | *"Tôi đồng ý với lời khuyên này"* | **GHI** `feedback` |
+
+⚠ **Nhìn cổng là biết service.** Dùng nhầm khoá sang service khác ⇒ **401**.
+`16021` smartsearch (`$SKEY`) · `16022` decision (`$DKEY`) · `16023` forecast (`$FKEY`) · `/internal/*` dùng `$ITOK`.
+
+## 3. Dữ liệu chảy đi đâu — bảng nào ai ghi
+
+```mermaid
+flowchart LR
+    subgraph API["API GHI VÀO"]
+        U["[01] :upsert"]
+        B9["[09] :backfill"]
+        B10["[10] :backfill"]
+    end
+
+    subgraph SOCAI["SỔ CÁI — ghi NGAY, không sửa"]
+        P[("products")]
+        OB[("catalog_outbox")]
+        RE[("raw_events")]
+    end
+
+    subgraph JOB["JOB NỀN — nhịp riêng"]
+        VF{{"vespa_feed<br/>2 giây"}}
+        EB{{"embed_backfill<br/>5 phút"}}
+        ST{{"suggest_terms<br/>1 giờ"}}
+        RU{{"rollup<br/>1 giờ"}}
+        SR{{"state_rollup<br/>5 phút"}}
+        FR{{"forecast_run<br/>24 giờ"}}
+        DR{{"decisions_run<br/>24 giờ"}}
+    end
+
+    subgraph HC["HÌNH CHIẾU — dựng lại được"]
+        VE[("Vespa index")]
+        SU[("suggest_terms")]
+        DD[("demand_daily")]
+        SD[("sales_daily")]
+        CS[("cost_state<br/>price_state<br/>stock_state")]
+        FC[("forecasts")]
+        DE[("decisions")]
+    end
+
+    U --> P
+    U --> OB
+    B9 --> RE
+    B10 --> RE
+
+    OB --> VF --> VE
+    P --> EB --> VE
+    P --> ST --> SU
+    RE --> RU --> DD
+    RE --> SR --> SD
+    RE --> SR --> CS
+    DD --> FR --> FC
+    SD --> DR --> DE
+    CS --> DR
+    FC --> DR
+```
+
+⭐⭐ **Đây là mẫu hình cốt lõi của cả hệ — hiểu nó là hiểu 90% buổi demo:**
+
+| | **SỔ CÁI** | **HÌNH CHIẾU** |
+|---|---|---|
+| Ghi lúc nào | **ngay lập tức** khi API nhận | theo **nhịp job nền** |
+| Sửa được không | **KHÔNG BAO GIỜ** — chỉ ghi thêm | dựng lại được, xoá đi không mất gì |
+| Ví dụ | `raw_events` · `products` | `demand_daily` · `forecasts` · `decisions` |
+
+> **"Ghi nhanh, tính chậm."** Đó là lý do bước `[09]` cho `raw_events = 21` nhưng `demand_daily = 0` — và
+> là lý do cửa vào chịu được giờ cao điểm: nó chỉ làm mỗi việc ghi thêm, mọi phép tính nặng đẩy sang nền.
+
+## 4. Bốn cổng chờ BẮT BUỘC — bỏ qua là hỏng
+
+| Sau bước | Phải làm gì | Bỏ qua thì sao |
+|---|---|---|
+| `[01]` | chờ đánh chỉ mục (`until ... /v1/ask`) | `[02]` ra hàng lung tung |
+| `[01]` | ⛔ **kích `embed_backfill`** | `[06]` rỗng ⇒ `[07]` ra **404** thay vì `cold_start_analog` |
+| `[03]` | ⛔ **kích `suggest_terms`** | bảng rỗng trước mặt khách |
+| `[10]` | ⛔ **kích `state_rollup`** | `ton=—` mãi ⇒ `[19]` không tính được |
+| `[11]` | chờ `[12]` báo `done` | `[13]` đọc phải số cũ |
+
+## 5. Ba cặp API "trước — sau" là xương sống buổi demo
+
+| Cặp | Trước (chưa có dữ liệu) | Sau (có 21 ngày) |
+|---|---|---|
+| `[07]` ↔ `[13]` | `cold_start_analog`, mượn 5 SKU, `data_window=null`, **p50 = 1,69** | `seasonal_naive`, `data_window` có giá trị, **p50 = 6,0** |
+| `[08]` ↔ `[17]` | **412** — "no sales in last 30d" | bảng tính đầy đủ, `confidence 0.7`, lãi **−30%** |
+| `[06]` ↔ `[19]` | chỉ có hàng xóm để mượn | ROP tính từ dữ liệu thật, **khách tự bấm máy kiểm** |
 
 ---
 ## CHUẨN BỊ (chạy 1 lần, trước khi khách vào phòng)
@@ -112,10 +277,22 @@ curl -s localhost:16021/v1/products:upsert -H "Authorization: Bearer $SKEY" -H "
 ```
 **OUTPUT thật:** `{"upserted":1,"queued_for_index":1}`
 
-### ③ ĐO SAU — **gõ NGAY, rồi gõ lại sau 10 giây**
+### ③ ĐO SAU — 🆕 **dán MỘT khối, gồm cả lệnh gọi API**
+
+> ⛔ **Đã vá 13/08 — bản cũ tách `curl` (②) và phép đo (③) thành hai lệnh, và cách đó GẦN NHƯ LUÔN HỤT.**
+> `vespa_feed` rút hàng đợi mỗi **2 giây**, mà thời gian người dẫn chuyển từ khối ② sang khối ③ luôn dài
+> hơn thế. Đo thật 13/08: chạy đúng theo bản cũ thì `NGAY SAU` đã ra `outbox=0` — **mất trọn cảnh đẹp nhất
+> của màn 1**. Nối vào một dòng thì bắt được (đã kiểm chứng: `TRƯỚC 0 → NGAY SAU 1`).
+>
+> `:upsert` **idempotent nhưng vẫn xếp hàng lại** với cùng nội dung (đo thật: gọi lần 2 vẫn trả
+> `queued_for_index: 1`), nên diễn lại bao nhiêu lần cũng được, không hỏng dữ liệu.
+
 ```bash
-echo "NGAY SAU : products=$(q miniai_search "SELECT count(*) FROM products WHERE project_id='demoshop' AND product_id='$SKU'")  outbox=$(q miniai_search "SELECT count(*) FROM catalog_outbox WHERE project_id='demoshop'")"
-sleep 10
+echo "TRƯỚC    : outbox=$(q miniai_search "SELECT count(*) FROM catalog_outbox WHERE project_id='demoshop'")"; \
+curl -s localhost:16021/v1/products:upsert -H "Authorization: Bearer $SKEY" -H "X-Project-Id: demoshop" -H "Content-Type: application/json" -d '{"products":[{"id":"demo-mi-omachi","title":"Thùng 30 gói mì Omachi sườn hầm ngũ quả 80g","description":"Mì ăn liền Omachi sợi khoai tây, vị sườn hầm ngũ quả, thùng 30 gói 80g","categories":["Bách hóa > Mì ăn liền"],"brands":["Omachi"],"price_info":{"currency_code":"VND","price":145000,"original_price":165000},"availability":"IN_STOCK","available_quantity":40,"attributes":{},"images":[],"publish_time":"2026-08-13T00:00:00Z"}]}'; \
+echo ""; \
+echo "NGAY SAU : products=$(q miniai_search "SELECT count(*) FROM products WHERE project_id='demoshop' AND product_id='$SKU'")  outbox=$(q miniai_search "SELECT count(*) FROM catalog_outbox WHERE project_id='demoshop'")"; \
+sleep 10; \
 echo "SAU 10s  : products=$(q miniai_search "SELECT count(*) FROM products WHERE project_id='demoshop' AND product_id='$SKU'")  outbox=$(q miniai_search "SELECT count(*) FROM catalog_outbox WHERE project_id='demoshop'")"
 ```
 **Đo thật 12/08 — đây là khoảnh khắc đắt nhất của màn này:**
@@ -205,6 +382,10 @@ liệu để ngày mai gợi ý thông minh hơn."*
 
 ---
 ## [03] GET /v1/suggest — gợi ý gõ phím đã có từ mới
+**Ý nghĩa:** khách gõ vài chữ trên ô tìm kiếm, hệ đoán tiếp cả cụm. Cụm từ **sinh từ tiêu đề sản phẩm** rồi
+được `query_log` nâng trọng số theo độ phổ biến. **Chức năng trong buổi demo:** cho thấy hàng mới có
+`weight = 1.0` — điểm khởi đầu, để lát so với hàng đã bán 4 tháng (`~400`) ở DEMO-2. *Giá trị của dữ liệu
+tích luỹ, nhìn thấy bằng một con số.*
 
 ### ① ĐO TRƯỚC
 ```bash
@@ -224,7 +405,16 @@ q miniai_search "SELECT count(*) AS so_cum_tu FROM suggest_terms WHERE project_i
 > asyncio.run(m())"
 > q miniai_search "SELECT count(*) AS so_cum_tu FROM suggest_terms WHERE project_id='demoshop' AND term LIKE '%omachi%';"
 > ```
-> **Đo thật sau khi kích (12/08):** bảng có **6 dòng** (mỗi cụm có thêm bản không dấu), **API trả 3 cụm**.
+> **Đo thật sau khi kích:** bảng có **6 dòng**, **API trả 3 cụm**.
+>
+> 🆕 **Đã vá 13/08 — lý do 6 vs 3 KHÔNG phải "bản không dấu".** Bản cũ giải thích sai. Đo thật 6 dòng:
+> ```
+> omachi · omachi sườn · omachi sườn hầm      ← API TRẢ (bắt đầu bằng "omachi")
+> mì omachi · gói mì omachi · mì omachi sườn  ← không trả (chỉ CHỨA)
+> ```
+> Đây là **6 cụm từ khác nhau** cắt từ tiêu đề, không phải 3 cụm × 2 biến thể. `term_unaccent` là một
+> **cột** trong cùng dòng, không đẻ ra dòng mới. **API khớp theo TIỀN TỐ** — đó mới là lý do chỉ 3 cụm
+> được trả. Gõ `mi` sẽ ra nhóm còn lại.
 > *"Đây là nhịp cộng sổ của gợi ý gõ phím — ngoài đời chạy mỗi giờ, ở đây tôi kích tay cho nhanh."*
 
 ### ② GỌI API
@@ -293,10 +483,20 @@ source: reco_pdp
 ### ③ ĐO SAU
 ```bash
 sleep 2; q miniai_search "SELECT count(*) AS luot_hien_thi FROM reco_exposure WHERE project_id='demoshop';"
-q miniai_search "SELECT product_id, position FROM reco_exposure WHERE project_id='demoshop' ORDER BY ts DESC LIMIT 3;"
+q miniai_search "SELECT product_id, position FROM (SELECT product_id, position, id FROM reco_exposure WHERE project_id='demoshop' ORDER BY id DESC LIMIT 12) t ORDER BY position LIMIT 3;"
 ```
-**Đo thật:** `1562 → 1574` (**+12 dòng**, đúng bằng số sản phẩm vừa gợi ý), 3 dòng mới nhất là
-`bh-mi-haohao|1`, `bh-hatdieu-500g|2`, `bh-giay-vesinh|3`.
+**Đo thật 13/08:** `2100 → 2112` (**+12 dòng**, đúng bằng số sản phẩm vừa gợi ý), 3 vị trí đầu là
+`bh-mi-haohao|0`, `bh-hatdieu-500g|1`, `bh-giay-vesinh|2` — **khớp đúng thứ tự API vừa trả**.
+
+> 🆕 **Đã vá 13/08 — hai lỗi trong câu SQL cũ.**
+> (1) **`position` đánh số từ 0**, bản cũ ghi `bh-mi-haohao|1` là sai, thật ra là `|0`.
+> (2) **`ORDER BY ts DESC` không sắp được trong cùng mẻ**: cả 12 dòng ghi một lượt nên `ts` **giống hệt
+> nhau tới micro-giây** (đo thật: `21:38:58.340711` × 12 dòng) ⇒ Postgres trả 3 dòng **tuỳ ý**. Chạy ngày
+> 13/08 nhận được `bh-cafe-g7|11 · bh-gao-st25|10 · bh-banh-oreo|9` — vô nghĩa với mạch kể.
+> Phải sắp theo **`id`** (chuỗi tăng dần) mới lấy đúng mẻ, rồi sắp lại theo `position` để đọc.
+>
+> ⚠ Con số nền `reco_exposure` **lớn dần mãi** (1562 ngày 12/08 → 2100 ngày 13/08) vì bảng chỉ-ghi-thêm.
+> Đọc từ màn hình, chỉ cần **hiệu số +12** là đúng.
 
 ### ④ LUỒNG
 ```
@@ -309,11 +509,25 @@ cái gì ở vị trí nào; không có con số này thì mọi phép học sau
 
 ---
 ## [05] POST /v1/ask — hỏi tự nhiên, có chặn bịa đặt
+**Ý nghĩa:** khách hỏi bằng câu nói thường (*"shop có bán mì ăn liền không?"*) thay vì gõ từ khoá. Hệ tìm
+ứng viên rồi **diễn đạt thành câu**. **Chức năng trong buổi demo:** khoe **3 tầng bảo vệ** — `grounding_guard`
+chặn mã hàng bịa, `answer_coherence` loại hàng lệch ngành, và `answer_source` **tự khai** dùng khuôn máy hay
+mô hình ngôn ngữ. *Đây là API dễ bịa nhất, nên cũng là API được canh chặt nhất.*
 
 ### ① ĐO TRƯỚC
 ```bash
 q miniai_search "SELECT count(*) FROM query_log WHERE project_id='demoshop' AND query_norm LIKE '%mi an lien%';"
 ```
+> ⚠ **Con số này KHÔNG phải 0 và đó là bình thường** (đo thật 13/08: ra `2`). `reset1` chỉ dọn
+> `query_norm LIKE '%omachi%'`, **không** dọn cụm `mi an lien` — nên nó tích luỹ qua mọi lần tập dượt.
+> Nếu khách để ý: *"Số này là từ những lần tôi tập trước — hệ nhớ mọi câu hỏi, kể cả của tôi."*
+>
+> 🆕 Đo 13/08 còn cho thấy `/v1/ask` lưu **nguyên văn cả câu hỏi** vào `query_norm`, không cắt thành từ khoá:
+> ```
+> mi an lien                     | 1
+> shop co ban mi an lien khong?  | 31    ← cnt tăng ở ĐÂY sau bước ②
+> ```
+> Nên ở bước ③, cái tăng là **`cnt` trong dòng có sẵn**, không phải số dòng. (Nợ đã ghi: `W-DEMO-RESET1-HARDEN`.)
 
 ### ② GỌI API
 ```bash
@@ -371,14 +585,34 @@ q miniai_search "SELECT count(*) AS co_vector FROM products WHERE project_id='de
 
 ### ② GỌI API
 ```bash
-curl -s "localhost:16021/internal/similar-products?project_id=demoshop&product_id=demo-mi-omachi&limit=5" -H "X-Internal-Token: $ITOK" | .venv/bin/python -m json.tool
+curl -s "localhost:16021/internal/similar-products?project_id=demoshop&product_id=demo-mi-omachi&k=5" -H "X-Internal-Token: $ITOK" | .venv/bin/python -m json.tool
 ```
-**OUTPUT thật 12/08**
+**OUTPUT thật 13/08** (có kèm `score`, bản cũ in thiếu)
 ```json
-{"items": [{"product_id": "bh-mi-haohao"}, {"product_id": "bh-nuocgiat-omo"},
-           {"product_id": "bh-banh-oreo"}, {"product_id": "bh-snack-oishi"},
-           {"product_id": "bh-suatuoi-th"}]}
+{"items": [{"product_id": "bh-mi-haohao",    "score": 0.3305},
+           {"product_id": "bh-nuocgiat-omo", "score": 0.3209},
+           {"product_id": "bh-banh-oreo",    "score": 0.3164},
+           {"product_id": "bh-snack-oishi",  "score": 0.3160},
+           {"product_id": "bh-suatuoi-th",   "score": 0.3149}]}
 ```
+
+> ⛔ **Đã vá 13/08 — bản cũ dùng `limit=5`, mà tham số đó BỊ LỜ IM LẶNG.** Endpoint khai báo tham số tên
+> **`k`** (`main.py:922`), không phải `limit`. FastAPI **bỏ qua mọi query param không khai báo** — đúng
+> loại lỗi đã vá cho `/v1/decisions?product_id=` ngày 12/08. Đo thật 13/08:
+> ```
+> k=3      → 3 item  ✓        limit=3  → 5 item  ✗ (bị lờ)
+> k=10     → 10 item ✓        limit=10 → 5 item  ✗ (bị lờ)
+> ```
+> Bản cũ **chỉ đúng do trùng hợp** — mặc định của `k` cũng bằng 5. Đổi thành `k=` thì mới điều khiển được.
+> Cổng chờ ở cuối `[01]` vốn đã dùng `k=5` đúng; hai chỗ trong cùng file dùng hai tên khác nhau.
+> (Nợ đã ghi sổ để sửa CODE: `W-INTERNAL-SIMILAR-LIMIT-IGNORED` — endpoint nên nhận `limit` làm bí danh
+> hoặc **từ chối 400** khi gặp param lạ, thay vì im lặng.)
+
+> ⚠ **Nếu khách soi danh sách:** có `bh-nuocgiat-omo` (nước giặt) trong 5 hàng xóm của mì gói. Đo thật
+> 13/08: điểm vector 5 món chỉ chênh **0.3305 → 0.3149**, tức vector **chưa tách được ngành** vì kho demo
+> chỉ 136 SKU. Câu trả lời trung thực: *"Đúng, chỗ này chưa chuẩn — khoảng cách giữa 5 món chỉ chênh 0,015.
+> Nhưng điều đáng nói là **hệ liệt kê ra để anh chị bắt được**. Một hệ giấu danh sách thì anh chị đã tin
+> nhầm con số dự báo mà không biết vì sao."*
 
 ### ③ ĐO SAU — 5 hàng xóm này có lịch sử bán không?
 ```bash
@@ -397,6 +631,12 @@ không dùng key của khách hàng."*
 
 ---
 ## [07] POST /v1/forecast:query — **HỆ KHÔNG BỊA, NÓ NÓI ĐANG MƯỢN CỦA AI**
+**Ý nghĩa:** trả lời *"hai tuần tới bán được bao nhiêu thùng mỗi ngày?"* — con số chủ shop cần để quyết
+**nhập bao nhiêu hàng**. Đây là **tầng ĐỌC**: mô hình đã chạy sẵn ở `[11]`, API này chỉ đọc kết quả đông
+lạnh rồi nhân hệ số lịch (Tết/lễ). **Chức năng trong buổi demo:** đây là **câu hỏi khó nhất với hàng mới** —
+sản phẩm vừa lên kệ 5 phút, chưa bán cái nào, mà chủ shop vẫn phải quyết ngay hôm nay. Ba cách một hệ có thể
+phản ứng: *trả 404 từ chối* (không giúp gì đúng lúc cần nhất) · *trả số trơn* (chủ shop tin nhầm) ·
+***trả số + khai đang mượn của ai*** (chủ shop tự phán được). miniAI chọn cách thứ ba.
 
 > 🆕 **ĐỔI SO VỚI BẢN 07/08.** Bản cũ ghi API này trả **404 "từ chối dự báo"**. Từ khi tính năng
 > **cold-start analog** (`F-COLDSTART-ANALOG-1`) lên, hệ **trả lời được** — nhưng **khai rõ** là đang mượn.
@@ -450,6 +690,17 @@ bao giờ tự khai như vậy."*
 
 ---
 ## [08] POST /v1/decisions:price-preview — **HỆ NÓI ĐÍCH DANH THIẾU GÌ**
+**Ý nghĩa:** API *thử-nếu-thì* về giá — *"nếu tôi hạ xuống 129 nghìn thì bán thêm bao nhiêu, lãi tăng hay
+giảm?"* Nó kiểm **3 cổng dữ liệu** trước khi tính: doanh số 30 ngày → giá vốn → giá hiện tại.
+**Chức năng trong buổi demo:** cặp đôi ĐỐI LẬP với `[07]` — cùng tình huống thiếu dữ liệu nhưng **hai service
+phản ứng khác nhau có chủ đích**:
+
+| | `[07]` forecast | `[08]` decision |
+|---|---|---|
+| Thiếu dữ liệu | **vẫn trả lời**, khai đang mượn | **từ chối thẳng**, `412` |
+| Vì sao | dự báo sai thì điều chỉnh được | **khuyên giá sai thì mất tiền thật** |
+
+*"Máy biết chỗ nào được phép đoán và chỗ nào không."* — câu đắt nhất của cặp `[07]`–`[08]`.
 
 ### ① ĐO TRƯỚC — chứng minh thiếu đúng 3 thứ
 ```bash
@@ -553,6 +804,20 @@ echo "raw_events VAN LA = $(q miniai_forecast "SELECT count(*) FROM raw_events W
 
 ---
 ## [10] POST /v1/events:backfill (decision) — thêm giá vốn + tồn kho
+**Ý nghĩa:** cùng hợp đồng API với `[09]` nhưng **gửi sang service khác** và **loại sự kiện khác**.
+`[09]` nói *"đây là 21 ngày tôi đã bán"* → nuôi **dự báo**. `[10]` nói *"đây là giá tôi nhập vào, giá tôi
+đang bán ra, và tôi còn bao nhiêu trong kho"* → nuôi **quyết định giá & nhập hàng**.
+
+**Chức năng trong buổi demo:** lấp nốt những cổng mà `[08]` đã than thiếu:
+
+| Sự kiện | Đổ vào bảng | Mở khoá bước nào |
+|---|---|---|
+| `cost.recorded` | `cost_ledger` → `cost_state` | `[17]` tính lãi · `[18]` chặn bán dưới vốn |
+| `price.changed` | `price_history` → `price_state` | `[17]` mốc để so giá thử |
+| `stock.level` | `stock_state` | `[19]` kế hoạch nhập hàng |
+
+⚠ **Khối lệnh có chứa lại 21 đơn cũ** — nhìn tưởng gửi doanh số lần nữa, nhưng kết quả `deduped: 21` cho
+thấy chúng **bị bỏ vì đã có sẵn**. Chúng nằm trong khối chỉ để chứng minh **chống trùng chạy chéo service**.
 
 ### ① ĐO TRƯỚC
 ```bash
@@ -643,25 +908,46 @@ q miniai_decision "SELECT count(*) AS ngay, sum(units) AS tong_ban FROM sales_da
 # MÀN 4 — GIỜ ĐÃ CÓ TRÍ KHÔN (9 API)
 
 ## [11] POST /v1/forecast:run — chạy lại dự báo (bất đồng bộ)
+**Ý nghĩa:** ra lệnh *"huấn luyện lại mô hình cho toàn bộ hàng trong shop"*. Nó **không tính ngay** — chỉ
+ghi một dòng việc vào hàng đợi rồi trả `202` (*"đã nhận việc"*), còn worker nền mới làm thật.
+**Chức năng trong buổi demo:** khoe kiến trúc bất đồng bộ — *"huấn luyện mất vài chục giây; nếu API ngồi
+chờ thì cửa vào sẽ nghẽn lúc đông khách. `202` là lời hứa, `[12]` mới là kết quả."*
+Bất biến: **một tenant, một ngày, một mẻ** — gọi lại trả cùng `job_id`, không nhân đôi công.
 
 ### ① ĐO TRƯỚC
 ```bash
 q miniai_forecast "SELECT count(*) AS job_dang_co FROM job_run WHERE tenant_id='demoshop' AND job_type='forecast_run';"
 q miniai_forecast "SELECT count(*) AS dong_du_bao FROM forecasts WHERE project_id='demoshop' AND product_id='$SKU';"
 ```
-**Đo thật:** `job = 1` (của hôm qua) · `dòng dự báo = 0`
+**Đo thật 13/08:** `job = 4` (các mẻ ngày trước) · `dòng dự báo = 0`
+*(Số job **lớn dần** theo số ngày đã chạy — chỉ cần `dòng dự báo = 0` là đúng.)*
 
 ### ② GỌI API
 ```bash
 curl -s -w "\nstatus: %{http_code}\n" -X POST localhost:16023/v1/forecast:run -H "Authorization: Bearer $FKEY" -H "X-Project-Id: demoshop" -H "Content-Type: application/json" -d '{}'
 ```
-**OUTPUT thật:** `202` + `{"status":"queued","run_id":"r_2026-08-13","job_id":"fr-demoshop-r_2026-08-13"}`
+**OUTPUT thật:** `202` + `{"status":"queued","run_id":"r_<NGÀY UTC>","job_id":"fr-demoshop-r_<NGÀY UTC>"}`
+
+> 🆕 **Đã vá 13/08 — `run_id` theo NGÀY UTC, không phải ngày trên máy.** `main.py:1118` dùng
+> `"r_" + date.today().isoformat()` trong container (múi UTC). Demo lúc **04:xx sáng giờ VN** thì UTC vẫn
+> là **hôm trước** ⇒ đo thật nhận `r_2026-08-12` chứ không phải `13`. Lệnh `[12]` dùng `date -u +%F` nên
+> vẫn khớp — chỉ là con số hiển thị khác ngày trên lịch của khách.
+>
+> ⭐ **Job cùng tên đã `done` từ trước KHÔNG chặn bước này.** `forecast_run.py:1104-1111` có
+> `ON CONFLICT (job_id) DO UPDATE SET status='queued' ... WHERE job_run.status IN ('done','dead')` —
+> job đã xong thì **xếp hàng lại**, vì dữ liệu có thể đã đổi. Đo thật 13/08: mẻ `r_2026-08-12` đã chạy
+> lúc 16:49, gọi lại vẫn ra `queued` đúng kịch bản và mẻ mới **có bao gồm SKU demo** (`forecasts` 0 → 28).
 
 ### ③ ĐO SAU — **việc đã vào hàng đợi, chưa làm xong**
 ```bash
 q miniai_forecast "SELECT job_id, status, attempt FROM job_run WHERE tenant_id='demoshop' AND job_type='forecast_run' ORDER BY updated_at DESC LIMIT 1;"
 ```
-**Đo thật:** `fr-demoshop-r_2026-08-13 | queued | 0` — **nhìn thấy việc nằm trong hàng đợi**.
+**Đo thật:** `fr-demoshop-r_<NGÀY UTC> | queued | 0` — **nhìn thấy việc nằm trong hàng đợi**.
+
+> ⚠ **Gõ NHANH.** Worker nhặt việc trong vài giây; chậm là đã thành `running`. Cả hai đều đúng, nhưng
+> `queued` mới là cảnh *"nhìn thấy việc nằm trong hàng đợi"*. Đo thật 13/08: kịp `running`, không kịp `queued`.
+> Vẫn nói được: *"API trả lời xong từ lâu, nhưng **việc thật vẫn đang chạy ở nền** — đó là lý do hệ chịu
+> được lúc đông khách."*
 
 ### ④ LUỒNG
 ```
@@ -674,6 +960,11 @@ ngay mã việc. Gọi lại khi việc đang chạy sẽ trả **cùng một m�
 
 ---
 ## [12] GET /v1/projections/status — theo dõi job tới khi xong
+**Ý nghĩa:** cặp đôi bắt buộc của `[11]`. `[11]` trả mã việc, API này trả lời *"việc đó chạy tới đâu rồi?"*
+Nó đọc **cả hai thứ**: trạng thái công việc (`queued → running → done/failed`) **và** hình chiếu đã bắt kịp
+sổ cái chưa (`is_caught_up`). **Chức năng trong buổi demo:** chứng minh **lỗi không bị nuốt** — nếu hỏng thì
+có `error_code` hiện ra, chứ không im lặng. Và đây là **cổng chờ**: đo `[13]` trước khi job xong sẽ đọc phải
+số cũ.
 
 ### ② GỌI API (vòng lặp bắt buộc)
 ```bash
@@ -700,6 +991,9 @@ kèm — **lỗi nhìn thấy được, không nuốt**."*
 
 ---
 ## [13] POST /v1/forecast:query — **GIỜ ĐÃ CÓ SỐ CỦA CHÍNH NÓ**
+**Ý nghĩa:** **cùng một API, cùng một lệnh y hệt `[07]`** — gõ lại sau khi đã có 21 ngày dữ liệu.
+**Chức năng trong buổi demo:** đây là **điểm chốt của cả kịch bản**. Không phải khoe API mới, mà khoe rằng
+*cùng một câu hỏi, cùng một cửa, nhưng câu trả lời đổi hẳn — và hệ **nói cho anh chị biết** nó đổi vì đâu.*
 
 ### ① ĐO TRƯỚC — số nằm sẵn trong kho
 ```bash
@@ -728,12 +1022,60 @@ forecasts (đã đông lạnh theo run_id) ──:query──► nhân hệ số
 - **`p90`** = kịch bản cao → **nhập hàng** (tránh cháy hàng)
 - **`p10`** = kịch bản thấp → **giữ dòng tiền**
 
-⭐ **So sánh với bước [07]:** giờ `run_id` là `r_2026-08-13` (không còn `analog_`), `model_used` là mô hình
+⭐ **So sánh với bước [07]:** giờ `run_id` là `r_<UTC>` (không còn `analog_`), `model_used` là mô hình
 thật, `data_window` **có giá trị** thay vì `null`. *"Cùng một API, nhưng giờ nó đứng trên dữ liệu của chính
 sản phẩm này — và nó nói cho anh chị biết điều đó."*
 
+### 🆕 ĐO THẬT 13/08 — hai điểm khoe bản cũ CHƯA nêu
+
+**(a) Hệ tự chọn mô hình theo lượng dữ liệu — bậc thang 3 nấc:**
+
+| Dữ liệu | `model_used` | Ở đâu |
+|---|---|---|
+| **0 ngày** | `cold_start_analog` — mượn 5 hàng xóm | `[07]` |
+| **21 ngày** | **`seasonal_naive`** — mô hình mùa vụ đơn giản | **bước này** |
+| **134 ngày** | `lgbm_global` — máy học đầy đủ | DEMO-2 `[13]` |
+
+*"Hệ **không dùng một mô hình cho tất cả**. Với 21 ngày, máy học phức tạp sẽ **học thuộc nhiễu** — dự báo
+trông đẹp mà sai. Phải đủ vài tháng nó mới nâng cấp. Nói cách khác: nó biết **tự lượng sức**."*
+`data_window` trả về `2026-07-22..2026-08-11` — **khớp chính xác** khoảng ngày vừa nạp ở `[09]`.
+
+**(b) ⭐⭐ CON SỐ ĐẮT NHẤT CẢ BUỔI — mượn thì lệch bao nhiêu:**
+
+| | `[07]` mượn hàng xóm | `[13]` dữ liệu của chính nó | Bán **thật** |
+|---|---|---|---|
+| p50 ngày đầu | `1.69` | **`6.0`** | TB ngày thường **3.60** |
+| p50 ngày 3 | `2.41` | **`9.3`** | TB cuối tuần **5.83** |
+
+> *"Bốn mươi phút trước, chưa có dữ liệu, máy đoán **1,7 thùng/ngày** dựa vào hàng xóm. Giờ có 21 ngày bán
+> thật, nó nói **6 thùng/ngày**. Thực tế hơn 4. Nghĩa là nhập theo con số đi mượn thì **thiếu hơn một nửa**
+> và cháy hàng. Đó chính là lý do máy phải **khai rõ nó đang mượn** — để anh chị đừng tin quá vào số đó."*
+
+Đây là lúc lời khai `cold_start_analog` ở `[07]` **thu hồi vốn**.
+
+⚠ **Chỗ hở nếu khách soi:** `seasonal_naive` lặp lại đúng thứ trong tuần của chu kỳ trước, mà 21 ngày =
+**chỉ 3 mẫu mỗi thứ** ⇒ còn nhiễu (đo thật: Thứ 7 `9.3` nhưng Chủ nhật chỉ `4.2`). Trả lời trung thực:
+*"Ba tuần thì mỗi ngày trong tuần mới có 3 mẫu — đủ thấy xu hướng, chưa đủ mịn."*
+
 ---
 ## [14] POST /v1/scenarios:build — dựng kịch bản Monte Carlo
+**Ý nghĩa:** trả lời loại câu hỏi mà `[13]` **không trả lời được**: *"trong 7 ngày tới, xác suất tôi bán
+được ít nhất 30 thùng là bao nhiêu?"*
+
+**Vì sao `forecast:query` không đủ — đây là điểm kỹ thuật đắt nhất của bước này.** `[13]` cho `p90` của
+**từng ngày riêng lẻ**: `7.5 · 7.7 · 11.7`. Muốn biết 3 ngày cần trữ bao nhiêu, cộng lại `= 26.9`?
+**SAI, và sai theo hướng nguy hiểm** — để tổng chạm 26.9 thì **cả ba ngày phải cùng lúc rơi vào kịch bản
+cao**, chuyện đó hiếm hơn nhiều so với một ngày cao. Cộng thô ra số **lớn hơn thực tế** ⇒ chủ shop **nhập
+dư, đọng vốn**.
+
+> ⭐ **Phân vị không cộng được.** Đây là lỗi kinh điển trong quản trị tồn kho.
+
+**Cách giải:** thay vì cộng, hệ **quay 128 kịch bản**, mỗi cái là một "thế giới có thể xảy ra" cho cả 7 ngày,
+rồi sắp 128 tổng đó và lấy phân vị. Giờ mới trả lời đúng.
+
+**Chức năng trong buổi demo:** đây là **tầng chuẩn bị** — nó không trả lời câu hỏi nào ngay, mà tạo ra
+nguyên liệu cho 3 API nhập-hàng ở **DEMO-2** (`lead-time-demand` · `aggregate` · `probability`). Điểm khoe
+là **tính kiểm toán được**: RNG có hạt giống nên tái lập, mỗi tệp có SHA-256 chống sửa lén.
 
 ### ① ĐO TRƯỚC
 ```bash
@@ -750,18 +1092,28 @@ curl -s localhost:16023/v1/scenarios:build -H "Authorization: Bearer $FKEY" -H "
   "rng_algorithm": "philox", "rng_version": "1", "scenario_index_contract": "v1",
   "files": {"marginals.npz": "57c8830a…", "factors.npz": "7aa2c0a0…"},
   "marginals": {"demo-mi-omachi": {"marginal_source": "history_empirical",
-                                   "tail": "none", "demand_class": "intermittent"}}}}
+                                   "tail": "none", "demand_class": "smooth"}}}}
 ```
+> 🆕 **Đã vá 13/08 — `demand_class` là `smooth`, không phải `intermittent`.** Hệ **tự phân loại** mặt hàng:
+> `smooth` = bán đều mỗi ngày · `intermittent` = bán lai rai, nhiều ngày bằng 0. SKU demo bán đều 21/21
+> ngày nên vào nhóm `smooth`, và hệ dùng **phân phối khác** cho từng nhóm.
+> ⭐ Điểm khoe thêm: *"Nó tự nhìn ra mặt hàng này bán đều hay bán lai rai, rồi chọn cách mô phỏng phù hợp —
+> không ép một khuôn cho tất cả."* (DEMO-2 `bh-mi-haohao` cho ra `intermittent`, đối chiếu được.)
 
 ### ③ ĐO SAU
 ```bash
 q miniai_forecast "SELECT run_id, created_at FROM scenario_manifest WHERE project_id='demoshop' ORDER BY created_at DESC LIMIT 1;"
 # ⚠ tệp nằm TRONG CONTAINER (MINIAI_ARTIFACT_DIR=/srv/data/artifacts), KHÔNG nằm ở data/ trên máy host
-docker exec miniai-forecast ls -la /srv/data/artifacts/scenario/demoshop/ | tail -3
+docker exec miniai-forecast ls -lat /srv/data/artifacts/scenario/demoshop/ | head -3
 ```
-**Đo thật:** `scenario_manifest` +1 dòng, và trong container có thư mục `sc_…` chứa `marginals.npz` ·
-`factors.npz` · `manifest.json`.
+**Đo thật 13/08:** `scenario_manifest` +1 dòng (`sc_125271a0b982`), và trong container có thư mục cùng tên
+chứa **3 tệp**: `marginals.npz` (2336 B) · `factors.npz` (284 B) · `manifest.json` (750 B — chứa SHA-256
+của hai tệp kia).
 > ⚠ Bản trước ghi `ls data/artifacts/...` trên host — **sai**, chạy sẽ báo `No such file or directory`.
+> 🆕 **Đã vá 13/08:** bản cũ dùng `ls -la ... | tail -3`, mà `ls` mặc định sắp theo **bảng chữ cái** — `run_id`
+> bắt đầu bằng chữ số nên thư mục mới nhất nằm ở **ĐẦU** danh sách, `tail` lấy nhầm 3 thư mục cũ (đo thật:
+> ra `sc_64189737d95f · sc_755e061a0bdd · sc_d4fff226eba0` của mẻ 16:32-16:45, **không có** mẻ vừa tạo).
+> Phải dùng **`ls -lat`** (sắp theo thời gian) + `head`.
 
 ### ④ LUỒNG
 ```
@@ -774,6 +1126,29 @@ lấy từ **lịch sử thật**, không phải giả định hình chuông.
 
 ---
 ## [15] POST /v1/decisions:run — chạy bộ não quyết định
+**Ý nghĩa:** **API duy nhất trong cả buổi thực sự RA QUYẾT ĐỊNH.** Mọi bước trước chỉ chuẩn bị dữ liệu.
+Nó quét **từng mặt hàng** trong shop và hỏi: *"hôm nay có nên khuyên chủ shop làm gì không?"*
+
+```
+với MỖI SKU: đọc sales_daily + cost_state + stock_state + price_state + forecasts + elasticity
+   → sinh ứng viên (7 loại lời khuyên)
+   → DecisionPlan giải xung đột (cùng SKU không được 2 lệnh giá mâu thuẫn)
+   → guardrails (dưới vốn? vượt trần giảm giá 50%? vừa đổi giá?)
+   → ghi decisions, kèm trace = TOÀN BỘ phép tính bằng chữ
+```
+
+**7 loại lời khuyên hệ biết sinh** (đo trên demoshop): `price_suggestion` 667 · `price_hold` 642 ·
+`replenishment_advice` 125 · `bundle_suggestion` 114 · `stockout_warning` 29 · `below_cost_alert` 4 ·
+`promo_legal_alert` 2. ⭐ `price_hold` gần bằng `price_suggestion` — hệ nói *"giữ nguyên"* nhiều gần bằng
+*"đổi giá"*, dấu hiệu của một hệ thận trọng.
+
+⭐⭐ **Chức năng trong buổi demo — khoe "máy biết khi nào NÊN IM LẶNG".** Đo thật 13/08: trong **137 mặt
+hàng** chỉ **2 lời khuyên mới**; bỏ qua 148 vì đã khuyên rồi, 141 vì SKU vừa đổi giá, 84 vì trùng kế hoạch.
+*"Một hệ AI khuyên đổi giá mỗi ngày là hệ **làm hại** chủ shop — nhân viên sẽ tắt thông báo sau một tuần.
+**Biết khi nào nên im khó hơn biết khi nào nên nói.**"*
+
+⭐ Đo 13/08 còn bắt được cảnh **máy tự bác bỏ chính nó**: nó sinh `price_suggestion`, rồi tầng `DecisionPlan`
+xét lại và thay bằng `price_hold` (`superseded_plan: 1`). Lệnh bị bỏ **vẫn lưu** với trạng thái `superseded`.
 
 ### ① ĐO TRƯỚC
 ```bash
@@ -815,6 +1190,16 @@ q miniai_decision "SELECT decision_id, kind, status FROM decisions WHERE project
 
 ---
 ## [16] GET /v1/decisions — danh sách lời khuyên
+**Ý nghĩa:** cửa để giao diện chủ shop **lấy về các lời khuyên đang có hiệu lực**. `[15]` sinh ra, `[16]`
+đọc lên.
+
+**Chức năng trong buổi demo:** mở cột **`trace`** — *"toàn bộ phép tính viết ra bằng chữ"*. Cột này khai báo
+`NOT NULL` trong CSDL, tức **không thể ghi một lời khuyên mà không giải thích được nó tính từ đâu**. Hộp đen
+bị chặn **ở tầng dữ liệu**, không phải bằng lời hứa của người bán phần mềm.
+
+⭐ Đo 13/08 còn lộ cột **`presentable`**: lời khuyên bị thay thế có `status=superseded, presentable=f` —
+**ẩn khỏi giao diện nhưng KHÔNG XOÁ**. *"Sáu tháng sau kiểm toán hỏi 'sao hôm đó máy không khuyên đổi giá',
+ta mở đúng dòng này ra đọc được cả lý do. **Xoá là mất dấu; ẩn là còn dấu.**"*
 
 ### ② GỌI API — 🆕 lọc thẳng theo SKU (vá 12/08)
 ```bash
@@ -843,6 +1228,10 @@ q miniai_decision "SELECT decision_id, kind, status, presentable FROM decisions 
 
 ---
 ## [17] POST /v1/decisions:price-preview — **GIỜ TRẢ LỜI ĐƯỢC** (trước đó 412)
+**Ý nghĩa:** **cùng một lệnh y hệt `[08]`** — gõ lại sau khi 3 cổng dữ liệu đã đủ. Lúc nãy ném `412`, giờ
+ra bảng tính đầy đủ. **Chức năng trong buổi demo:** cặp "trước — sau" thứ hai (sau `[07]`↔`[13]`), và là chỗ
+máy **can trực giác của chủ shop bằng con số**: *"giảm giá cho chạy hàng"* nghe hợp lý, nhưng máy chỉ ra
+lãi tháng **giảm 30%**.
 
 ### ① ĐO TRƯỚC — 3 cổng dữ liệu giờ đã đủ
 ```bash
@@ -856,32 +1245,67 @@ echo "do co gian   = $(q miniai_decision "SELECT coalesce(round(max(eps)::numeri
 ```bash
 curl -s localhost:16022/v1/decisions:price-preview -H "Authorization: Bearer $DKEY" -H "X-Project-Id: demoshop" -H "Content-Type: application/json" -d '{"product_id":"demo-mi-omachi","candidate_price":129000}' | .venv/bin/python -m json.tool
 ```
-**OUTPUT thật** (hình dạng — số đổi theo dữ liệu sinh ngẫu nhiên)
+**OUTPUT thật 13/08** (số đổi theo dữ liệu sinh ngẫu nhiên — đọc từ màn hình)
 ```json
 {"current":   {"price": 145000.0, "est_units_30d": 89.0,  "est_profit_30d": 4183000.0},
- "candidate": {"price": 129000,   "est_units_30d": 95.17, "est_profit_30d": 2950372.3},
- "delta_profit_30d": -1232627.68,
- "elasticity_used": {"eps": -0.5736, "method": "pooled_prior", "n_points": 21, "r2": null},
+ "candidate": {"price": 129000,   "est_units_30d": 93.96, "est_profit_30d": 2912847.5},
+ "delta_profit_30d": -1270152.5,
+ "elasticity_used": {"eps": -0.4641, "method": "pooled_prior", "n_points": 19, "r2": null},
  "guardrails": [{"code": "BELOW_COST", "status": "PASS"}],
  "confidence": 0.7,
  "explanation": "Q(P)=Q0·(P/P0)^eps; profit=(P-c)·Q"}
 ```
+
+> ⚠ `n_points` là **19**, không phải 21 — ước lượng co giãn cần **có biến động giá**, vài ngày bị loại.
+
+**Bảng dịch cho khách — con số phần trăm mới là thứ thuyết phục:**
+
+| | Hiện tại | Nếu giảm giá | Thay đổi |
+|---|---|---|---|
+| Giá | 145.000 | 129.000 | **−11,0%** |
+| Bán/tháng | 89 thùng | 93,96 thùng | **+5,6%** |
+| **Lãi/tháng** | **4.183.000đ** | **2.912.847đ** | **−30,4%** |
+
+*"Giảm giá 11% bán thêm được 5,6% — hàng chạy hơn thật. Nhưng lãi tháng **giảm 30%**. Vì mỗi thùng chỉ lãi
+47 nghìn (145 − 98); giảm còn 129 thì lãi chỉ 31 nghìn — **mất một phần ba lợi nhuận mỗi thùng** để đổi lấy
+5% số lượng. Không bù nổi."*
+
+> ⭐⭐ **Đối chiếu `eps` với DEMO-2 — cảnh đẹp nhất của bước này** (đo thật 13/08):
+> ```
+> demo-mi-omachi :  eps −0.4641 · n=19  · r2 TRỐNG   · method pooled_prior
+> bh-mi-haohao   :  eps −0.4641 · n=132 · r2 0.4172  · method ols_daily
+> ```
+> **Hai con số `eps` GIỐNG HỆT NHAU — nhưng hệ vẫn tự hạ điểm tin cậy.** *"Về kết quả, cái mượn đang đúng.
+> Nhưng hệ **không biết** điều đó — nó chỉ biết mình đang mượn số trung bình của shop, chỉ có 19 điểm, và
+> không tính được `r2`. Nên nó khai `pooled_prior` và hạ độ tin xuống 0.7. Đó là **trung thực về nhận thức**:
+> không vì đoán trúng mà tự nhận là mình biết chắc."*
 
 ### ③ ĐO SAU — đối chiếu độ co giãn API dùng với bảng
 ```bash
 q miniai_decision "SELECT eps, n_points, r2, method FROM elasticity WHERE project_id='demoshop' AND product_id='$SKU';"
 ```
 **Điểm chốt:** `method = pooled_prior` = **khai thật đang MƯỢN** độ co giãn trung bình của shop vì SKU mới
-chỉ có 21 điểm. `r2 = null` = chưa có độ khớp riêng. `confidence 0.7` (không phải 0.9) — **tự hạ điểm tin cậy
-vì bằng chứng yếu hơn**.
+chỉ có **19 điểm**. `r2` **trống** = chưa có độ khớp riêng. `confidence 0.7` (không phải 0.9) — **tự hạ điểm
+tin cậy vì bằng chứng yếu hơn**. Đo 13/08: API và bảng khớp tới **từng chữ số float**.
 
 ### ④ Đọc kết quả cho khách
-Giảm 145.000 → 129.000 thì **bán thêm** (89 → 95 thùng/tháng)… nhưng
-`delta_profit_30d = **−1,23 triệu/tháng**` ⇒ **lãi GIẢM**. *"Máy can bằng con số, chặn trực giác 'giảm giá
-cho chạy hàng'."*
+Giảm 145.000 → 129.000 thì **bán thêm** (89 → 93,96 thùng/tháng)… nhưng
+`delta_profit_30d = **−1,27 triệu/tháng**` ⇒ **lãi GIẢM 30%**. *"Máy can bằng con số, chặn trực giác 'giảm
+giá cho chạy hàng'."*
 
 ---
 ## [18] POST /v1/decisions:price-preview (giá dưới vốn) — guardrail phải chặn
+**Ý nghĩa:** vẫn API đó, nhưng thử một **giá vô lý** (80.000 khi vốn 98.000 — mỗi thùng lỗ 18.000).
+**Chức năng trong buổi demo:** chứng minh **chốt an toàn là chốt CỨNG**, không phải lời khuyên mềm:
+
+| | `[17]` giá 129.000 | `[18]` giá 80.000 |
+|---|---|---|
+| `BELOW_COST` | **PASS** — trên vốn | **FAIL** — dưới vốn |
+| Lãi tháng | giảm 1,27 triệu (vẫn dương) | **âm 6,3 triệu** |
+| Máy nói | *"được, nhưng lỗ lãi"* | ***"KHÔNG"*** |
+
+⭐ Đo 13/08: lãi đang **+4.183.000đ/tháng**, hạ xuống 80k thì thành **−2.111.000đ/tháng** — từ lãi sang
+**lỗ thật**. *"Máy không chỉ nói 'không nên' — nó nói **mất bao nhiêu tiền**."*
 
 ### ① ĐO TRƯỚC
 ```bash
@@ -902,49 +1326,105 @@ tôi tìm ra, và đã có test hồi quy khoá lại."*
 
 ---
 ## [19] GET /v1/decisions:replenish-plan — nhập bao nhiêu, khi nào
+**Ý nghĩa:** trả lời câu hỏi **tốn tiền nhất** của chủ shop: *"khi nào tôi phải đặt hàng, và đặt bao nhiêu?"*
+Đặt sớm quá ⇒ đọng vốn. Đặt muộn quá ⇒ cháy hàng, mất khách.
+
+Nó ghép 4 nguồn: nhịp bán (`sales_daily`) · tồn kho (`stock_state`) · thời gian giao hàng
+(`supplier_config`) · mức dịch vụ mong muốn (90%). Rồi tính:
+
+```
+ROP = avg_daily × LT + z × √(LT × σd² + avg_d² × σLT²)
+        ↑ bán bình thường    ↑ đệm an toàn cho dao động
+```
+
+⭐⭐ **Chức năng trong buổi demo — khoảnh khắc MẠNH NHẤT cả buổi.** Không phải vì con số, mà vì **API tự in
+công thức ra trong kết quả** (`"formula": "ROP = ..."`), và khách **bấm máy tính ra đúng con số đó**.
+*"Đây là thứ biến buổi demo từ 'tin tôi đi' thành 'anh chị tự kiểm'."*
 
 ### ① ĐO TRƯỚC — nguyên liệu của phép tính
 ```bash
-q miniai_decision "SELECT round(avg(units),3) AS ban_tb_ngay, round(stddev_samp(units),3) AS dao_dong FROM sales_daily WHERE project_id='demoshop' AND product_id='$SKU' AND day >= CURRENT_DATE-30;"
+# ⚠ chia cho TRỌN 30 ngày cửa sổ — ĐÚNG cách API tính (xem ghi chú dưới)
+q miniai_decision "SELECT round(sum(units)/30.0,3) AS ban_tb_ngay, count(*) AS so_ngay_co_du_lieu, sum(units) AS tong_ban FROM sales_daily WHERE project_id='demoshop' AND product_id='$SKU' AND day >= CURRENT_DATE-30;"
 q miniai_decision "SELECT on_hand_qty AS ton_kho FROM stock_state WHERE project_id='demoshop' AND product_id='$SKU';"
 ```
+
+> ⛔ **Đã vá 13/08 — bản cũ dùng `avg(units)` và ra SỐ KHÁC API, gây mâu thuẫn trước mặt khách.**
+> ```
+> avg(units)      → 89 ÷ 21 ngày CÓ dòng   = 4.238   ← bản cũ
+> API             → 89 ÷ TRỌN 30 ngày      = 2.967   ← đúng cách API tính
+> ```
+> API chia cho **trọn cửa sổ 30 ngày**, coi 9 ngày SKU chưa tồn tại là "bán 0" (`window_days: 30` có
+> trong response). Với hàng đã bán lâu thì hai cách bằng nhau — **chỉ lệch đúng ở tình huống demo này**,
+> sản phẩm mới 21 ngày tuổi.
+>
+> ⚠ **Hệ quả thật, nên biết trước:** máy báo *"đủ bán 13,5 ngày"* trong khi theo nhịp bán thật (4,24/ngày)
+> thì chỉ **9,4 ngày**; điểm đặt lại `32.14` thay vì `42.18`. Tức với SKU MỚI, máy ước lượng **thấp hơn
+> thực tế ~30%**. Câu trả lời trung thực nếu khách bắt được: *"Sản phẩm mới sinh ra 21 ngày trước, nên
+> cửa sổ 30 ngày chưa phủ trọn. Sang tháng thứ hai hai con số sẽ bằng nhau."*
+> (Nợ đã ghi sổ: `W-REPLENISH-NEW-SKU-WINDOW`.)
 
 ### ② GỌI API
 ```bash
 curl -s "localhost:16022/v1/decisions:replenish-plan?product_id=demo-mi-omachi" -H "Authorization: Bearer $DKEY" -H "X-Project-Id: demoshop" | .venv/bin/python -m json.tool
 ```
-**OUTPUT thật** (hình dạng)
+**OUTPUT thật 13/08** (số đổi theo dữ liệu sinh ngẫu nhiên — **ĐỌC TỪ MÀN HÌNH**)
 ```json
 {"items": [{"product_id": "demo-mi-omachi",
-  "avg_daily_units": 2.967, "sigma_daily": 2.773,
+  "avg_daily_units": 2.967, "sigma_daily": 2.498,
   "lead_time_days": 7.0, "lead_time_std": 2.0,
   "service_level": 0.9, "z": 1.28,
-  "safety_stock": 12.08, "reorder_point": 32.84,
+  "safety_stock": 11.37, "reorder_point": 32.14,
   "on_hand": 40.0, "days_of_inventory": 13.5, "below_reorder_point": false,
-  "formula": "ROP = avg_daily*LT + z*sqrt(LT*sigma_d^2 + avg_d^2*sigma_LT^2); DOI = on_hand/avg_daily"}]}
+  "moq": 0.0, "pack_size": 1.0, "order_qty_moq_pack": 0,
+  "formula": "ROP = avg_daily*LT + z*sqrt(LT*sigma_d^2 + avg_d^2*sigma_LT^2); sigma_LT=0 => z*sigma_d*sqrt(LT); DOI = on_hand/avg_daily"}]}
 ```
 
 ### ③ ĐO SAU — **tự kiểm phép tính bằng tay**
+
+> ⛔⛔ **ĐỪNG DÙNG SỐ IN SẴN DƯỚI ĐÂY — PHẢI THAY BẰNG SỐ API VỪA TRẢ TRÊN MÀN HÌNH.**
+> Đo thật 13/08: người dẫn dán nguyên khối cũ (`sig=2.773`) và nó ra đúng `12.08 / 32.84` — **khớp với
+> con số in trong tài liệu nhưng KHÔNG khớp với API hôm đó** (`11.37 / 32.14`). Thành ra chép đáp án chứ
+> không kiểm API — **mất sạch ý nghĩa của cả bước này**. Sáu biến phải lấy từ chính response ở bước ②:
+> `avg_daily_units` · `sigma_daily` · `lead_time_days` · `lead_time_std` · `z` · `on_hand`.
+
 ```bash
+# ⚠ THAY 6 số này bằng đúng số API vừa in ra ở bước ②
 .venv/bin/python -c "
 import math
-avg, sig, LT, sLT, z, on_hand = 2.967, 2.773, 7.0, 2.0, 1.28, 40.0
+avg, sig, LT, sLT, z, on_hand = 2.967, 2.498, 7.0, 2.0, 1.28, 40.0
 ss  = z*math.sqrt(LT*sig**2 + avg**2*sLT**2)
 rop = avg*LT + ss
-print(f'safety_stock  = {ss:.2f}   (API nói 12.08)')
-print(f'reorder_point = {rop:.2f}  (API nói 32.84)')
-print(f'days_of_inv   = {on_hand/avg:.1f}   (API nói 13.5)')"
+print(f'safety_stock  = {ss:.2f}   (so voi API)')
+print(f'reorder_point = {rop:.2f}  (so voi API)')
+print(f'days_of_inv   = {on_hand/avg:.1f}   (so voi API)')"
 ```
+**Đo thật 13/08 với đúng số API:** ra `11.37 / 32.14 / 13.5` — **khớp tuyệt đối**.
+
 **Đây là khoảnh khắc mạnh nhất của màn 4:** công thức in ngay trong kết quả API, khách **tự bấm máy tính ra
-đúng con số đó**.
+đúng con số đó**. Cách diễn đúng tinh thần: *"Tôi không dùng con số in sẵn trong tài liệu — tôi lấy **đúng
+sáu con số API vừa trả trên màn hình** và bấm lại. Ra y hệt."*
 
 ### ④ Dịch sang lời chủ shop
-- Bán TB **2,97 thùng/ngày**, dao động ±2,77 · hàng về mất **7 ngày** (±2)
-- Muốn **90% không cháy hàng** ⇒ trữ thêm **12,08 thùng dự phòng**
-- ⇒ **Đặt lại khi còn 32,84 thùng.** Đang có 40 ⇒ **chưa cần đặt**, đủ bán **13,5 ngày**
+- Bán TB **2,97 thùng/ngày**, dao động ±2,50 · hàng về mất **7 ngày** (±2)
+- Muốn **90% không cháy hàng** ⇒ trữ thêm **11,37 thùng dự phòng**
+- ⇒ **Đặt lại khi còn 32,14 thùng.** Đang có 40 ⇒ **chưa cần đặt**, đủ bán **13,5 ngày**
 
 ---
 ## [20] POST /v1/decisions/{id}:feedback — chủ shop phán, khép vòng
+**Ý nghĩa:** cửa để chủ shop trả lời máy — *"lời khuyên này tôi đồng ý / tôi bỏ qua"*. Nghe đơn giản nhưng
+đây là **mắt xích đóng vòng học**:
+
+```
+[15] máy khuyên  →  [16] chủ shop đọc  →  [20] chủ shop phán
+                                              ├─► accepted_rate: tỷ lệ máy được nghe theo
+                                              └─► sau 30 ngày: outcome_ledger
+                                                    so LÃI THỰC TẾ với expected_value đã HỨA
+```
+
+⭐⭐ **Chức năng trong buổi demo — câu chốt của cả kịch bản.** Bảng `outcome_ledger` có cặp cột
+`predicted_ev` ↔ `realized_ev`: **lời hứa đối chiếu với kết quả**. *"Đây là thứ phân biệt một hệ AI nghiêm
+túc với một cái máy đoán: **nó chịu trách nhiệm với lời khuyên của mình bằng số.** Không có bảng này thì mọi
+con số `expected_value` chỉ là lời hứa đẹp không ai kiểm."*
 
 ### ① ĐO TRƯỚC
 ```bash
@@ -994,14 +1474,30 @@ với lời khuyên của mình bằng số**."*
 curl -s -X DELETE "localhost:16021/v1/products/demo-mi-omachi" -H "Authorization: Bearer $SKEY" -H "X-Project-Id: demoshop" -w "xoa san pham: status %{http_code}\n"
 
 for db in miniai_forecast miniai_decision miniai_search; do docker exec miniai-postgres psql -U miniai -d $db -tAc "DO \$\$ DECLARE t text; BEGIN FOR t IN SELECT table_name FROM information_schema.columns WHERE table_schema='public' AND column_name='product_id' LOOP EXECUTE format('DELETE FROM %I WHERE product_id=%L', t, 'demo-mi-omachi'); END LOOP; END \$\$;" >/dev/null 2>&1; done
+# ⛔ feedback PHẢI xoá TRƯỚC decisions — câu con đọc vào bảng decisions (không có khoá ngoại, CSDL không lo hộ)
+q miniai_decision "DELETE FROM feedback  WHERE project_id='demoshop' AND decision_id IN (SELECT decision_id FROM decisions WHERE subject_id='demo-mi-omachi');"
 q miniai_decision "DELETE FROM decisions WHERE project_id='demoshop' AND (subject_id='demo-mi-omachi' OR trace LIKE '%demo-mi-omachi%');"
 q miniai_forecast "DELETE FROM raw_events WHERE project_id='demoshop' AND payload::text LIKE '%demo-mi-omachi%';"
 q miniai_decision "DELETE FROM raw_events WHERE project_id='demoshop' AND payload::text LIKE '%demo-mi-omachi%';"
-# 🆕 hai bảng bản cũ bỏ sót — không xoá thì suggest weight sẽ KHÁC 1.0 lần sau
+# 🆕 hai bảng bản 07/08 bỏ sót — không xoá thì suggest weight sẽ KHÁC 1.0 lần sau
 q miniai_search  "DELETE FROM query_log     WHERE project_id='demoshop' AND query_norm LIKE '%omachi%';"
 q miniai_search  "DELETE FROM suggest_terms WHERE project_id='demoshop' AND term       LIKE '%omachi%';"
+# 🆕 SỔ CÁI CHUNG — bản 07/08 VÀ 12/08 đều bỏ sót; không xoá thì lần sau [09] ra `conflicted: 24` thay vì 0
+q miniai_ledger  "DELETE FROM event_ledger  WHERE project_id='demoshop' AND payload::text LIKE '%demo-mi-omachi%';"
 rm -f /tmp/ev.json /tmp/fq.json
 ```
+
+> ⛔ **Đã vá 13/08 — khối DỌN SÂN cũ THIẾU 2 bảng so với `reset1`.** Đo thật sau khi chạy đúng bản cũ:
+> ```
+> event_ledger    = 24 dòng còn lại   →  lần sau [09] ra `conflicted: 24` thay vì 0
+> feedback mồ côi = 15 dòng           →  trỏ vào decision_id đã bị xoá
+> ```
+> `feedback` **15 dòng** chứ không phải 1 — lỗ hổng này đã tích luỹ qua nhiều lượt tập trước.
+> Đây là hậu quả trực tiếp của việc **hệ không có khoá ngoại nào** (đo được: 0 ràng buộc `FOREIGN KEY`
+> trên cả 4 kho): CSDL không tự dọn theo, thứ tự và phạm vi xoá phải tự lo bằng tay.
+>
+> 💡 **Cách an toàn nhất: cứ gõ `reset1`** — hàm đó vốn đã dọn đủ cả 4 kho. Khối rời này chỉ để đọc hiểu.
+> 📘 Bản đồ quan hệ + thứ tự xoá bắt buộc: `icpp/db-docs/MINIAI-DB-SCHEMA.md` §9.6
 
 **Kiểm lại đã sạch chưa — phải ra 0 hết:**
 ```bash
@@ -1016,13 +1512,15 @@ q miniai_search "SELECT 'suggest_terms='||count(*) FROM suggest_terms WHERE proj
 | Câu hỏi | Trước khi có dữ liệu | Sau 21 ngày dữ liệu |
 |---|---|---|
 | Tìm thấy hàng không? | ✅ sau ~10 giây (nhìn thấy hàng đợi 0→1→0) | ✅ |
-| Gợi ý gõ phím? | ✅ `weight 1.0` | (DEMO-2: **334.8**) |
-| Gợi ý hàng liên quan? | ✅ đúng ngành (bậc thang cold-start) | ✅ |
-| Dự báo nhu cầu? | ⚠️ **có số, nhưng khai `cold_start_analog` + liệt kê 5 hàng nó mượn** | ✅ mô hình riêng, `data_window` có giá trị |
-| Khuyên giá? | ❌ **412 — nói rõ thiếu doanh số** (tự kiểm bằng SQL: 0 dòng) | ✅ kèm cảnh báo lãi giảm ~1,23 triệu/tháng |
-| Chặn bán dưới vốn? | — | ✅ `BELOW_COST: FAIL` |
-| Nhập hàng bao nhiêu? | ❌ chưa đủ cơ sở | ✅ ROP 32,8 — còn 40, đủ 13,5 ngày, **tự bấm máy ra đúng số** |
+| Gợi ý gõ phím? | ✅ `weight 1.0` | (DEMO-2: **~400**, lớn dần theo ngày) |
+| Gợi ý hàng liên quan? | ✅ đúng ngành ở vị trí #1 | ✅ |
+| Dự báo nhu cầu? | ⚠️ **có số, nhưng khai `cold_start_analog` + liệt kê 5 hàng nó mượn** | ✅ `seasonal_naive`, `data_window` có giá trị |
+| ⭐ Dự báo lệch bao nhiêu? | mượn: **1,69/ngày** | của chính nó: **6,0/ngày** · thật ~**4,2** |
+| Khuyên giá? | ❌ **412 — nói rõ thiếu doanh số** (tự kiểm bằng SQL: 0 dòng) | ✅ kèm cảnh báo lãi **giảm 30%** (−1,27 triệu/tháng) |
+| Chặn bán dưới vốn? | — | ✅ `BELOW_COST: FAIL`, lãi âm 6,3 triệu |
+| Nhập hàng bao nhiêu? | ❌ chưa đủ cơ sở | ✅ ROP 32,14 — còn 40, đủ 13,5 ngày, **tự bấm máy ra đúng số** |
 | Độ tin cậy khai báo? | — | ✅ `pooled_prior`, `confidence 0.7` — **tự khai đang mượn** |
+| Máy có biết im lặng không? | — | ✅ **2 lời khuyên / 137 SKU** — bỏ qua 148 vì đã khuyên rồi |
 
 **Câu chốt:** *"Mọi câu trả lời của hệ đều tự khai nó dựa trên cái gì và tin tới đâu. Khi chưa đủ cơ sở, nó
 nói thiếu gì hoặc nói đang mượn của ai — chứ không đoán bừa. Và anh chị vừa tự kiểm từng con số bằng SQL,
@@ -1032,14 +1530,31 @@ không phải tin lời tôi."*
 # VÁ NGÀY 13/08 — chỉ sửa TÀI LIỆU, KHÔNG đụng mã nguồn
 
 > ⛔ **Không deploy gì, nên 4 lượt nghiệm thu e2e đã chạy VẪN CÒN GIÁ TRỊ** (luật đầu file chỉ reset
-> khi thay đổi **bản code**). Hai sửa đổi dưới đây nằm hoàn toàn trong file `.md` này.
+> khi thay đổi **bản code**). **15 sửa đổi** dưới đây nằm hoàn toàn trong file `.md` này — tìm ra trong
+> một lượt chạy trọn 20/20 API ngày 13/08.
 
 | Chỗ | Bản cũ | Nay | Vì sao |
 |---|---|---|---|
+| ⛔ `[06]` ② | `limit=5` | **`k=5`** | **THAM SỐ BỊ LỜ IM LẶNG.** Endpoint khai `k` (`main.py:922`), FastAPI bỏ qua param lạ. Đo: `limit=10 → 5 item` (sai) · `k=10 → 10 item` (đúng). Bản cũ chỉ đúng do **trùng hợp** — mặc định cũng là 5. Cùng loại lỗi `?product_id=` đã vá 12/08 |
+| ⛔ `[19]` ③ | 6 số **in cứng** trong khối tự-kiểm | **cảnh báo phải thay bằng số API** | Đo 13/08: người dẫn dán nguyên khối cũ → ra `12.08/32.84` khớp **tài liệu** nhưng lệch **API hôm đó** (`11.37/32.14`) ⇒ hoá ra chép đáp án, **mất sạch ý nghĩa bước này** |
+| ⛔ `[19]` ① | `avg(units)` | **`sum(units)/30.0`** | API chia trọn 30 ngày, câu cũ chia 21 ngày có dòng ⇒ `4.238` vs `2.967` — **mâu thuẫn ngay trước mặt khách** |
+| ⛔ DỌN SÂN | thiếu `feedback` + `event_ledger` | **đã bổ sung** | đo 13/08 sau khi chạy bản cũ: còn **24 dòng sổ cái** (⇒ lần sau `conflicted: 24`) và **15 dòng feedback mồ côi** |
+| `[17]` OUTPUT | `eps −0.5736 · n=21 · 95.17 · −1.232.627` | **`−0.4641 · n=19 · 93.96 · −1.270.152`** | số cũ của lần đo khác; thêm bảng % và đối chiếu `eps` với DEMO-2 |
+| `[19]` OUTPUT | `sigma 2.773 · ss 12.08 · ROP 32.84` | **`2.498 · 11.37 · 32.14`** | đo lại 13/08; thêm 3 trường `moq`/`pack_size`/`order_qty_moq_pack` bản cũ thiếu |
+| `[11]` ① và ③ | `job = 1` · `r_2026-08-13` | **`job = 4`** · **`r_<UTC>`** | số job lớn dần theo ngày; và cảnh báo gõ nhanh để bắt `queued` |
+| Đầu file | không có luật đọc số | **thêm "LUẬT ĐỌC SỐ"** | mọi số là ảnh chụp một lần đo, không phải hằng số |
 | ⛔ `[03]` ③ ĐO SAU | `round(weight,2)` | **`round(weight::numeric,2)`** | **LỆNH NỔ TRƯỚC MẶT KHÁCH.** `suggest_terms.weight` kiểu `double precision`; Postgres **không có** `round(double, int)`, chỉ có `round(numeric, int)`. Tái lập 100%: `ERROR: function round(double precision, integer) does not exist`. Cùng lỗi ở **DEMO-2** `[03]`①③ và `[04]`① — đã vá cả 4 chỗ |
 | `[06]` ① ĐO TRƯỚC | `embedding_version IS NOT NULL` | **`embedding_version > 0`** | cột là `NOT NULL DEFAULT 0` ⇒ vế cũ **luôn đúng**, cổng canh vector cho **xanh giả**. Mã nguồn không sai — `store/products.py:251` dùng `WHERE embedding_version < $1` |
+| ⛔ `[04]` ③ ĐO SAU | `ORDER BY ts DESC LIMIT 3` + `position` từ 1 | **sắp theo `id`** + `position` **từ 0** | 12 dòng ghi cùng lượt có `ts` **giống hệt tới micro-giây** ⇒ Postgres trả 3 dòng tuỳ ý. Chạy 13/08 nhận `bh-cafe-g7|11 · bh-gao-st25|10 · bh-banh-oreo|9` — vô nghĩa. Và `position` **đánh số từ 0** |
 | `[03]` điểm khoe | `weight 334.8` | **`~400`** + cảnh báo | số này **lớn dần theo ngày**: 334.8 (07/08) → 376.96 (12/08) → 401.28 (13/08) |
 | chú thích hàm `q()` | "1 trong **3** kho" | "1 trong **4** kho" | `reset1` có gọi `q miniai_ledger`, chú thích cũ bỏ sót sổ cái chung |
+| ⛔ `[01]` ③ | `curl` và phép đo **tách 2 lệnh** | **nối 1 khối** | `vespa_feed` rút hàng đợi mỗi **2 giây**, tay người chuyển khối luôn chậm hơn ⇒ `NGAY SAU` đã ra `outbox=0`, **mất cảnh đẹp nhất màn 1** |
+| ⛔ `[14]` ③ | `ls -la ... \| tail -3` | **`ls -lat ... \| head -3`** | `ls` sắp theo **bảng chữ cái**, `run_id` bắt đầu bằng chữ số nên thư mục mới nhất nằm ở ĐẦU ⇒ `tail` lấy nhầm 3 thư mục cũ |
+| `[03]` giải thích 6 dòng | "mỗi cụm có bản không dấu" | **khớp theo TIỀN TỐ** | là **6 cụm khác nhau**, không phải 3×2. `term_unaccent` là cột, không đẻ dòng. API chỉ trả cụm *bắt đầu* bằng `omachi` |
+| `[05]` ① | ngầm hiểu ra `0` | ghi rõ ra **`2`** | `reset1` không dọn cụm `mi an lien`; và `/v1/ask` lưu **nguyên câu hỏi**, nên ③ tăng `cnt` chứ không tăng số dòng |
+| `[11]` OUTPUT | `run_id: r_2026-08-13` | **`r_<NGÀY UTC>`** | `date.today()` trong container = **UTC**; demo 04:xx sáng VN thì UTC còn hôm trước |
+| `[13]` | không nêu `model_used` | **bậc thang 3 nấc mô hình** + so số mượn-vs-thật | `seasonal_naive` ở 21 ngày; và analog `1.69` vs thật `6.0` — **con số đắt nhất cả buổi** |
+| `[14]` manifest | `demand_class: intermittent` | **`smooth`** | hệ tự phân loại bán-đều / bán-lai-rai và dùng phân phối khác nhau |
 
 **Đã chạy kiểm chứng 13/08 — cả 4 câu sửa đều ra kết quả, không còn `ERROR`:**
 ```
