@@ -823,8 +823,81 @@ Ba dòng thật của `demoshop` ngày 11/08:
 
 - Cột này **không đến từ giao dịch** mà đến từ event `promo.scheduled` — loại duy nhất mang một **khoảng**
   thời gian. Rollup "tô" `discount_pct` ra từng ngày trong `[start, end]`.
-- Nhiều đợt chồng nhau ⇒ lấy **sâu nhất** (`max`), không cộng dồn.
+- Nhiều đợt chồng nhau ⇒ lấy **sâu nhất** (`max`), không cộng dồn — mổ kỹ ở mục 7b ngay dưới.
 - Đây là đầu vào để BT03 học hệ số uplift `k` — *"giảm 1% thì bán tăng bao nhiêu"*.
+
+---
+
+**7b. Một SKU, một ngày, có 2 (hay 5) đợt khuyến mãi thì sao?**
+
+> ⚠ **Câu hỏi của học viên: "nếu 1 SKU trong 1 ngày có sự thay đổi 2 lần thì thế nào?"**
+
+Luật nằm gọn trong một dòng code (`rollup.py:131`):
+
+```python
+promo[key] = max(promo[key], discount_pct)
+```
+
+**LẤY SÂU NHẤT.** Không phải "cái sau đè cái trước", cũng không phải cộng dồn.
+
+**Ca thật, đọc được ngay trong DB** — shop `bulktest`, SKU `sku-0015`, có **hai đợt chồng nhau**:
+
+| Đợt | Giảm | Từ | Đến |
+|---|---|---|---|
+| A | **59,462 %** | 25/06 | 03/07 |
+| B | **21,120 %** | 29/06 | 05/07 |
+
+Vùng chồng lấn là **29/06 → 03/07** (5 ngày). Bảng `demand_daily` ghi thế này:
+
+| ngày | đợt đang chạy | `promo_pct` trong bảng |
+|---|---|---|
+| 24/06 | — | `0` |
+| 25/06 → 28/06 | chỉ A | `59,462` |
+| **29/06 → 03/07** | **A và B cùng lúc** | **`59,462`** ← lấy sâu nhất, B bị bỏ qua |
+| 04/07 → 05/07 | A hết, chỉ còn B | `21,120` |
+| 06/07 | cả hai đã hết | `0` |
+
+Để ý ngày 04/07: đợt sâu hơn hết hạn thì con số **tự tụt xuống** 21,120 — không "dính" lại. Vì `max` được tính
+**cho từng ngày một**, không phải một lần cho cả đợt.
+
+**Ba hệ quả phải nhớ:**
+
+**(1) Không có khái niệm GIỜ.** `promo_pct` là con số của **cả ngày**. Code lấy `.date()` của `start` và `end`
+(`rollup.py:125-126`) rồi lặp từng ngày, nên một đợt sale bắt đầu lúc **15:00** vẫn phủ **trọn ngày hôm đó**
+trong bảng. Nghiệp vụ cần độ chính xác theo giờ thì cột này **không đáp ứng được** — giới hạn có chủ ý, vì cả
+BT03 chạy theo nhịp ngày.
+
+**(2) ⛔ KHÔNG có đường "huỷ" hay "sửa" khuyến mãi.** Trong 13 loại event **không có** `promo.cancelled` hay
+`promo.updated`. Hệ quả trực tiếp:
+
+> Shop khai nhầm **50%**, phát hiện ra, khai lại **10%** cho đúng ngày đó ⇒ bảng vẫn giữ **50%**.
+> Lần khai sau **không đè** được lần khai trước, vì luật là `max` chứ không phải "mới nhất thắng".
+
+Đây là cạm bẫy thật, và nó **im lặng** — không lỗi, không cảnh báo. Người vận hành sẽ thấy `promo_pct` không
+chịu xuống mà không hiểu vì sao. Đường duy nhất hiện nay là sửa dưới DB, hoặc chờ đợt sai hết hạn.
+
+**(3) Không cộng dồn — và cộng dồn cũng sai về kinh tế.** Hai đợt 20% và 30% cùng ngày ⇒ bảng ghi **30**,
+không phải 50. Kể cả nếu muốn "chồng khuyến mãi thật" thì phép đúng cũng không phải phép cộng:
+
+```
+giảm 20% rồi giảm tiếp 30%  →  giá còn 0,8 × 0,7 = 0,56  →  giảm thực tế 44 %,  KHÔNG phải 50 %
+```
+
+**Vì sao chọn `max` mà không phải hai phương án kia?**
+
+| Phương án | Vấn đề |
+|---|---|
+| **Cái sau đè cái trước** (last-write-wins) | Kết quả phụ thuộc **thứ tự đọc event**; hai đợt khai sát nhau thì thứ tự do DB quyết ⇒ **chạy lại có thể ra số khác** — phá tính tái lập, vốn là bất biến của cả tầng 2 |
+| **Cộng dồn** | Sai về kinh tế (xem phép tính trên), và có thể vượt 100% ⇒ giá âm |
+| **`max` (đang dùng)** | Tất định, không phụ thuộc thứ tự; và **khớp với thứ khách hàng thật sự nhìn thấy** — người mua luôn hưởng mức giảm tốt nhất đang có, chứ không cộng các mã lại |
+
+Lý do cuối là lý do mạnh nhất: cột này tồn tại để trả lời *"ngày đó người mua nhìn thấy mức giảm bao nhiêu"* —
+và người mua thấy **mức tốt nhất**, không thấy tổng.
+
+**Nối sang việc BT03 dùng cột này làm gì.** `promo_pct` là đầu vào để học hệ số uplift `k` (*"giảm 1% thì bán
+tăng bao nhiêu"*). Nếu một đợt khai nhầm quá sâu bị kẹt trong bảng, hệ sẽ thấy *"giảm 50% mà bán chẳng tăng
+mấy"* ⇒ **`k` học bị thấp đi**, và mọi dự báo cho ngày sale tương lai hụt theo. Một dòng khai sai không chỉ sai
+một ngày — nó lệch cả tham số của shop đó.
 
 ---
 
