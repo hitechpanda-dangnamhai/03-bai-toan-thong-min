@@ -694,7 +694,83 @@ Ba điều dễ hiểu nhầm:
   phỏng), và `numeric` là kiểu **thập phân chính xác** — không phải `float` — nên cộng hàng triệu dòng không
   trôi số lẻ.
 - **Mặc định `0`, không phải NULL.** Ngày không bán gì ⇒ `0`. Đây là con số **thật**, không phải "không biết".
-- **Đã trừ hàng trả, và bị kẹp ở 0.** Ngày có nhiều hàng trả hơn hàng bán ⇒ vẫn ghi `0`, không ghi số âm.
+- **Đã trừ hàng trả, và bị KẸP ở 0** — xem ngay mục dưới, vì chỗ này nghe vô lý cho tới khi thấy code.
+
+---
+
+**4b. Vì sao "trả nhiều hơn bán" lại ghi `0` chứ không ghi số âm?**
+
+> ⚠ **Câu hỏi của học viên: "hàng trả trừ đi hàng bán, nếu trả nhiều hơn thì ra số âm mà, sao lại ghi 0?"**
+> Đúng — phép trừ **thật sự ra số âm**. Nhưng có một bước nữa sau phép trừ mà bản trước tôi viết gộp thành một
+> dòng nên đọc ra vô lý. Đây là toàn bộ sự thật, ba bước.
+
+**Bước 1 — cộng hàng bán** (`rollup.py:99`):
+```python
+units[key] += qty        # mỗi dòng hàng trong purchase.completed
+```
+
+**Bước 2 — trừ hàng trả** (`rollup.py:111`):
+```python
+units[key] -= qty        # mỗi dòng hàng trong order.returned
+```
+Tới đây `units[key]` **hoàn toàn có thể âm**. Không có gì chặn.
+
+**Bước 3 — lúc GHI XUỐNG BẢNG mới kẹp** (`rollup.py:174`):
+```python
+u = max(0.0, units.get(key, 0.0))     # ← số âm bị nâng lên 0 ở ĐÂY
+```
+
+Nên câu đúng phải là: **phép trừ ra số âm thật, nhưng số âm không bao giờ được ghi vào bảng.** Nó bị chặn ở
+cửa ghi, không phải ở phép tính.
+
+**Ca thật, đọc được ngay trong DB:**
+
+Shop `p1`, SKU `px`, ngày **2026-08-04** — có **20 event `order.returned`** (mỗi cái `qty: 1`) và **không có
+lượt mua nào**:
+
+```
+raw_events   :  bán 0  ·  trả 20   ⇒  units[key] = 0 − 20 = −20
+demand_daily :  units_sold = 0                    ← đã kẹp
+```
+
+| ngày | bán | trả | ròng (trước kẹp) | `units_sold` ghi vào bảng |
+|---|---|---|---|---|
+| 2026-08-02 | 0 | 4 | **−4** | **0** |
+| 2026-08-03 | 0 | 14 | **−14** | **0** |
+| 2026-08-04 | 0 | 20 | **−20** | **0** |
+| 2026-08-05 | 0 | 20 | **−20** | **0** |
+
+**Vì sao phải kẹp — bốn lý do, đều là hỏng thật nếu không kẹp:**
+
+1. **"Cầu âm" không có nghĩa.** Cột này trả lời câu *"ngày đó thị trường muốn mua bao nhiêu cái"*. Câu trả lời
+   nhỏ nhất có thể có là **không ai muốn mua = 0**. Không tồn tại "âm 20 người muốn mua".
+2. **Toán học vỡ ngay.** Nhiều model trong thang lấy `log` của chuỗi (ETS, Theta), tính hệ số biến thiên, hoặc
+   ước lượng phân phối đếm (Croston/NBD — vốn chỉ định nghĩa trên số **không âm**). `log(−20)` không tồn tại;
+   phương sai tính ra số bịa; quantile trả về vô nghĩa. Một dòng âm làm **hỏng cả chuỗi của SKU đó**.
+3. **Hàng trả là chuyện của NGÀY KHÁC.** 20 cái trả hôm 04/08 là hàng đã bán từ tuần trước. Trừ hết vào 04/08
+   là gán hậu quả sai ngày. Nhưng dự án **cố ý chọn** trừ vào ngày trả (xem CỤM 1 §"LỆCH 2") vì phương án kia
+   — trừ ngược vào ngày mua — sẽ **viết lại quá khứ** mà model đã học và đã ra quyết định trên đó.
+4. **Nếu không kẹp thì phải kẹp ở chỗ khác.** Mỗi model lại tự xử số âm theo một kiểu ⇒ hai model ra hai con
+   số khác nhau cho cùng một ngày. Kẹp **một lần, tại một chỗ** là rẻ nhất và dễ giải thích nhất.
+
+**Cái gì bị mất, cái gì KHÔNG mất — đây mới là phần quan trọng:**
+
+| | Có mất không? |
+|---|---|
+| Thông tin *"ngày 04/08 có 20 lượt trả hàng"* | **KHÔNG mất** — 20 dòng `order.returned` nằm nguyên trong `raw_events`, đọc lại bất cứ lúc nào |
+| Mức độ âm (`−20` so với `−4`) | **MẤT** trong `demand_daily` — cả hai đều thành `0` |
+| Khả năng phân tích tỷ lệ trả hàng | **KHÔNG mất** — tính thẳng từ `raw_events`, không cần cột này |
+
+Nói cách khác: `demand_daily` **không phải sổ kế toán**, nó là **đầu vào cho model dự báo cầu**. Sổ gốc vẫn là
+`raw_events` và không bị đụng tới. Đây là lý do kiến trúc giữ **cả hai tầng** thay vì chỉ giữ bảng đã gom.
+
+> **Đánh đổi viết ra:** thà mất thông tin *"ngày này trả hàng nhiều"* trong bảng đã gom, còn hơn để một số âm
+> chảy vào model và làm hỏng toàn bộ chuỗi. Ai cần số liệu trả hàng thì đọc `raw_events` — đúng nhà của nó.
+
+📌 **Đính chính số dòng code:** tài liệu gốc `ALGO-FORECAST-BT03` (viết 07/08) ghi phép kẹp ở `rollup.py:172`.
+Đọc lại code hôm nay là **`rollup.py:174`** — lệch 2 dòng vì bản vá `W-JOB-SCHEDULE-STATE-ANCHOR` (10/08) thêm
+một dòng `import` vào đầu file. Bài học nhỏ nhưng thật: **số dòng là thứ hết hạn nhanh nhất trong mọi tài
+liệu** — luôn kiểm lại bằng mắt trước khi tin.
 
 ---
 
