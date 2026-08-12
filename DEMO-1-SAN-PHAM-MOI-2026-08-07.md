@@ -38,7 +38,8 @@ echo "keys ${SKEY:0:6}/${DKEY:0:6}/${FKEY:0:6} | internal ${ITOK:0:4}"
 
 ### ⭐ BỘ ĐO — dán 1 lần, dùng cho cả buổi
 ```bash
-# chạy một câu SQL trên 1 trong 3 kho: miniai_search | miniai_decision | miniai_forecast
+# chạy một câu SQL trên 1 trong 4 kho: miniai_search | miniai_decision | miniai_forecast | miniai_ledger
+# (kho thứ 4 = sổ cái chung, `reset1` có dùng — xem giải thích `conflicted` ở [09])
 q(){ docker exec miniai-postgres psql -U miniai -d "$1" -tAc "$2"; }
 
 # ⭐ RESET — gõ MỘT CHỮ là sân sạch, chạy lại kịch bản từ đầu bao nhiêu lần cũng được.
@@ -241,9 +242,17 @@ curl -s "localhost:16021/v1/suggest?q=omachi&limit=5" -H "Authorization: Bearer 
 
 ### ③ ĐO SAU — đối chiếu số của API với số trong kho
 ```bash
-q miniai_search "SELECT term, round(weight,2) FROM suggest_terms WHERE project_id='demoshop' AND term LIKE '%omachi%' ORDER BY weight DESC;"
+q miniai_search "SELECT term, round(weight::numeric,2) FROM suggest_terms WHERE project_id='demoshop' AND term LIKE '%omachi%' ORDER BY weight DESC;"
 ```
 **Đo thật:** 3 dòng, `weight = 1.0` — **khớp đúng con số API vừa trả**.
+
+> 🆕 **Đã vá 13/08 — bản cũ viết `round(weight,2)` và lệnh NỔ TRƯỚC MẶT KHÁCH.**
+> Cột `suggest_terms.weight` kiểu `double precision`, mà Postgres chỉ có `round(numeric, int)` —
+> không có bản 2 tham số cho `double`. Lỗi tái lập 100%:
+> ```
+> ERROR:  function round(double precision, integer) does not exist
+> ```
+> Phải ép `::numeric` trước. Cùng lỗi này còn ở **DEMO-2 bước [03] và [04]** — đã vá cả hai.
 
 ### ④ LUỒNG
 ```
@@ -252,8 +261,11 @@ query_log.cnt  ─────────────────────�
 ```
 **Điểm khoe:** `is_caught_up: true` nghĩa là **dữ liệu trả về đã bắt kịp sổ cái**
 (`projection_watermark == ledger_head`) — khách biết mình đang nhìn số mới nhất.
-`weight = 1.0` = hàng mới chưa ai tìm. **So với DEMO-2: cụm "mì hảo hảo" có weight 334.8** — đó là giá trị
+`weight = 1.0` = hàng mới chưa ai tìm. **So với DEMO-2: cụm "mì hảo hảo" có weight ~400** — đó là giá trị
 của dữ liệu tích luỹ, nhìn thấy bằng một con số.
+
+> ⚠ **`weight` là số ĐANG LỚN DẦN, đừng đọc thuộc.** Đo được: `334.8` (07/08) → `376.96` (12/08) →
+> **`401.28` (13/08)**. Cứ đọc từ màn hình. Con số bên hàng mới thì luôn là `1.0` — đó mới là điểm so sánh.
 
 ---
 ## [04] POST /v1/recommend (context=pdp) — gợi ý trên trang sản phẩm MỚI
@@ -340,8 +352,22 @@ hình ngôn ngữ. Trước bản vá 06/08, hỏi 'mì' mà trả bàn phím l�
 
 ### ① ĐO TRƯỚC
 ```bash
-q miniai_search "SELECT count(*) AS co_vector FROM products WHERE project_id='demoshop' AND product_id='$SKU' AND embedding_version IS NOT NULL;"
+q miniai_search "SELECT count(*) AS co_vector FROM products WHERE project_id='demoshop' AND product_id='$SKU' AND embedding_version > 0;"
 ```
+**Cách đọc:** `1` = đã có vector, sang bước ② được. `0` = **chưa có** — quay lại chạy cổng kích vector
+ở cuối `[01]`, nếu không thì `[07]` sẽ ra 404 thay vì `cold_start_analog`.
+
+> 🆕 **Đã vá 13/08 — phép đo cũ cho XANH GIẢ.** Bản trước viết `AND embedding_version IS NOT NULL`.
+> Cột này khai báo là `NOT NULL DEFAULT 0` (đo từ `information_schema`), nên vế `IS NOT NULL`
+> **luôn đúng** — kể cả với SKU có `embedding_version = 0` tức chưa hề sinh vector. Chứng minh:
+> ```
+> sku-chua-co-vector | IS NOT NULL -> true | > 0 -> false
+> sku-da-co-vector   | IS NOT NULL -> true | > 0 -> true
+> ```
+> Tức câu cũ chỉ đếm *"sản phẩm có tồn tại không"*, không đếm *"đã có vector chưa"* như tên biến
+> `co_vector` hứa hẹn. **Chỉ tài liệu sai — mã nguồn ĐÚNG** (`store/products.py:251` dùng
+> `WHERE embedding_version < $1`, so sánh số, không dùng `IS NOT NULL` ở bất kỳ đâu).
+> Đo thật 13/08 trên demoshop: 114/114 SKU có `embedding_version = 1`.
 
 ### ② GỌI API
 ```bash
@@ -1003,6 +1029,41 @@ nói thiếu gì hoặc nói đang mượn của ai — chứ không đoán bừ
 không phải tin lời tôi."*
 
 ---
+# VÁ NGÀY 13/08 — chỉ sửa TÀI LIỆU, KHÔNG đụng mã nguồn
+
+> ⛔ **Không deploy gì, nên 4 lượt nghiệm thu e2e đã chạy VẪN CÒN GIÁ TRỊ** (luật đầu file chỉ reset
+> khi thay đổi **bản code**). Hai sửa đổi dưới đây nằm hoàn toàn trong file `.md` này.
+
+| Chỗ | Bản cũ | Nay | Vì sao |
+|---|---|---|---|
+| ⛔ `[03]` ③ ĐO SAU | `round(weight,2)` | **`round(weight::numeric,2)`** | **LỆNH NỔ TRƯỚC MẶT KHÁCH.** `suggest_terms.weight` kiểu `double precision`; Postgres **không có** `round(double, int)`, chỉ có `round(numeric, int)`. Tái lập 100%: `ERROR: function round(double precision, integer) does not exist`. Cùng lỗi ở **DEMO-2** `[03]`①③ và `[04]`① — đã vá cả 4 chỗ |
+| `[06]` ① ĐO TRƯỚC | `embedding_version IS NOT NULL` | **`embedding_version > 0`** | cột là `NOT NULL DEFAULT 0` ⇒ vế cũ **luôn đúng**, cổng canh vector cho **xanh giả**. Mã nguồn không sai — `store/products.py:251` dùng `WHERE embedding_version < $1` |
+| `[03]` điểm khoe | `weight 334.8` | **`~400`** + cảnh báo | số này **lớn dần theo ngày**: 334.8 (07/08) → 376.96 (12/08) → 401.28 (13/08) |
+| chú thích hàm `q()` | "1 trong **3** kho" | "1 trong **4** kho" | `reset1` có gọi `q miniai_ledger`, chú thích cũ bỏ sót sổ cái chung |
+
+**Đã chạy kiểm chứng 13/08 — cả 4 câu sửa đều ra kết quả, không còn `ERROR`:**
+```
+DEMO-2 [03]① →  mì|401.28   mì hảo|401.28   mì hảo hảo|401.28
+DEMO-2 [04]① →  bh-snack-oishi|71|34.70     bh-xucxich-ducviet|69|28.21
+```
+
+⚠ **Vì sao 4 lượt e2e trước KHÔNG bắt được lỗi này:** đây là các câu SQL ở mục "① ĐO TRƯỚC / ③ ĐO SAU" —
+phần *người dẫn gõ tay để chứng minh*, không nằm trong đường chạy API mà bộ e2e đo. Bài học: **lệnh trong
+tài liệu cũng là deliverable, cũng phải chạy thật ≥1 lần** (LUẬT-0 mục 4).
+
+**Ba điểm ĐÃ RÀ nhưng CỐ Ý KHÔNG SỬA trước demo** (đổi hành vi lệnh ⇒ phải đếm lại 4 lượt; ghi ra đây để quyết sau):
+
+1. Vòng lặp `DO $$` trong `reset1` xoá **không kèm `project_id`** ⇒ về nguyên tắc là xoá **xuyên tenant**.
+   Vô hại hiện tại vì mã `demo-mi-omachi` chỉ tồn tại ở `demoshop`.
+2. Cùng vòng lặp đó có `2>&1` ⇒ **giấu cả luồng lỗi**. Postgres chết cũng không hiện gì; dòng `echo`
+   cuối hàm `reset1` là phép kiểm chứng độc lập duy nhất.
+3. `LIKE '%omachi%'` ở 2 dòng dọn `query_log`/`suggest_terms` là tìm **chuỗi con**, sẽ quét cả SKU thật
+   nào có chứa chữ "omachi" nếu shop phát sinh sau này.
+
+> 📘 Lược đồ CSDL đầy đủ (70 bảng · từng cột · ERD · ai ghi bảng nào): `icpp/db-docs/MINIAI-DB-SCHEMA.md`
+
+---
+
 # ĐÃ ĐỔI SO VỚI BẢN 07/08 (đo lại 12/08 — đọc trước khi lên sân)
 
 | Chỗ | Bản 07/08 | Thực tế 12/08 | Ảnh hưởng demo |

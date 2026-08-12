@@ -97,8 +97,11 @@ sleep 2; q miniai_search "SELECT cnt, results_count_last, user_cnt FROM query_lo
 ## [03] GET /v1/suggest — gợi ý gõ phím có trọng số theo độ phổ biến
 ### ① ĐO TRƯỚC — trọng số nằm sẵn trong bảng
 ```bash
-q miniai_search "SELECT term, round(weight,2) FROM suggest_terms WHERE project_id='demoshop' AND term LIKE 'mì%' ORDER BY weight DESC LIMIT 4;"
+q miniai_search "SELECT term, round(weight::numeric,2) FROM suggest_terms WHERE project_id='demoshop' AND term LIKE 'mì%' ORDER BY weight DESC LIMIT 4;"
 ```
+> 🆕 **Đã vá 13/08 — bản cũ viết `round(weight,2)`, lệnh NỔ ngay:**
+> `ERROR: function round(double precision, integer) does not exist`.
+> `suggest_terms.weight` kiểu `double precision`, Postgres chỉ có `round(numeric, int)` → phải ép `::numeric`.
 ### ② GỌI API
 ```bash
 curl -s "localhost:16021/v1/suggest?q=mi&limit=4" -H "Authorization: Bearer $SKEY" -H "X-Project-Id: demoshop" | .venv/bin/python -m json.tool
@@ -111,7 +114,7 @@ curl -s "localhost:16021/v1/suggest?q=mi&limit=4" -H "Authorization: Bearer $SKE
 ```
 ### ③ ĐO SAU — số của API **phải khớp** số trong bảng
 ```bash
-q miniai_search "SELECT term, round(weight,2) FROM suggest_terms WHERE project_id='demoshop' AND term IN ('mì','mì hảo hảo') ORDER BY weight DESC;"
+q miniai_search "SELECT term, round(weight::numeric,2) FROM suggest_terms WHERE project_id='demoshop' AND term IN ('mì','mì hảo hảo') ORDER BY weight DESC;"
 ```
 ### ④ LUỒNG + điểm khoe
 ```
@@ -126,7 +129,7 @@ query_log.cnt  ─┴─job suggest_terms (mỗi 1 GIỜ)──► suggest_terms
 ## [04] POST /v1/recommend (context=pdp) — mua kèm thật, học từ hành vi
 ### ① ĐO TRƯỚC — tri thức "mua chung" nằm ở đâu
 ```bash
-q miniai_search "SELECT product_b, cnt, round(lift,2) FROM co_occurrence WHERE project_id='demoshop' AND product_a='$SKU' ORDER BY lift DESC LIMIT 3;"
+q miniai_search "SELECT product_b, cnt, round(lift::numeric,2) FROM co_occurrence WHERE project_id='demoshop' AND product_a='$SKU' ORDER BY lift DESC LIMIT 3;"
 q miniai_search "SELECT count(*) FROM reco_exposure WHERE project_id='demoshop';"
 ```
 ### ② GỌI API
@@ -821,6 +824,41 @@ anh chị đều đã tự truy vấn thẳng vào cơ sở dữ liệu để đ
 đó cũng là điểm cộng về chất lượng API.
 
 ---
+# VÁ NGÀY 13/08 — chỉ sửa TÀI LIỆU, KHÔNG đụng mã nguồn
+
+> ⛔ **Không deploy gì, nên 4 lượt nghiệm thu e2e đã chạy VẪN CÒN GIÁ TRỊ.**
+
+**Ba câu SQL trong file này ĐANG NỔ** — `ERROR: function round(double precision, integer) does not exist`.
+Postgres chỉ có `round(numeric, int)`, **không có** bản cho `double precision`. Ba cột dính đều là `double`:
+
+| Chỗ | Cột | Bản cũ | Nay |
+|---|---|---|---|
+| `[03]` ① ĐO TRƯỚC | `suggest_terms.weight` | `round(weight,2)` | **`round(weight::numeric,2)`** |
+| `[03]` ③ ĐO SAU | `suggest_terms.weight` | `round(weight,2)` | **`round(weight::numeric,2)`** |
+| `[04]` ① ĐO TRƯỚC | `co_occurrence.lift` | `round(lift,2)` | **`round(lift::numeric,2)`** |
+
+**Đã chạy kiểm chứng 13/08 sau khi vá:**
+```
+[03] →  mì|401.28   mì hảo|401.28   mì hảo hảo|401.28
+[04] →  bh-snack-oishi|71|34.70     bh-xucxich-ducviet|69|28.21
+```
+
+⚠ **`weight` lớn dần theo ngày** — 334.8 (07/08) → 376.96 (12/08) → **401.28 (13/08)**. Đừng đọc thuộc số
+ở mục `[03]`, hãy đọc từ màn hình. Điểm so sánh với DEMO-1 (`weight = 1.0`) thì không đổi.
+
+⚠ **Vì sao 4 lượt e2e không bắt được:** đây là SQL người dẫn gõ tay ở mục ĐO TRƯỚC/ĐO SAU, không nằm trong
+đường chạy API mà bộ e2e đo. Bài học: **lệnh trong tài liệu cũng là deliverable, phải chạy thật ≥1 lần**.
+
+**Các cột `double precision` khác cần nhớ** (dùng `round()` 2 tham số là nổ): `popularity.score_24h/7d/30d` ·
+`intent_kg.weight` · `merch_rules.weight` · `products.rating_avg` · `impression_log.propensity` ·
+`price_bandit_state.mu/sigma` · `supplier_config.lead_time_days/lead_time_std/moq/pack_size` ·
+`experiment_gate_audit.ci_lo/ci_hi/cum_loss/loss_budget/diff_mean` · `quota_counter.used` ·
+`calendar_events.uplift_pre/in/post`.
+
+> 📘 Lược đồ CSDL đầy đủ (70 bảng · từng cột · kiểu · ERD): `icpp/db-docs/MINIAI-DB-SCHEMA.md`
+
+---
+
 # PHỤ LỤC B — ĐÃ ĐỔI SO VỚI BẢN 07/08 (đo lại 12/08)
 
 | Chỗ | Bản 07/08 | Thực tế 12/08 |
