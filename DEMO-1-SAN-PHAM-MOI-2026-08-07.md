@@ -263,19 +263,52 @@ echo "outbox   = $(q miniai_search "SELECT count(*) FROM catalog_outbox WHERE pr
 **Đo thật 12/08:** `products = 0` · `outbox = 0`
 
 ### ② GỌI API
-| Trường | Bắt buộc | Ý nghĩa |
-|---|---|---|
-| `id` | ✔ | mã SKU, khoá chính trong tenant |
-| `title` | ✔ | tên hiển thị — **nguồn chính cho tìm kiếm** (BM25 + vector) |
-| `categories` | ✔ | `"Cha > Con"`; phần trước `>` thành `category_l1` để lọc/gộp |
-| `price_info.price` | ✔ | giá bán (VND, số nguyên) |
-| `availability` | ✔ | `IN_STOCK`/`OUT_OF_STOCK` — hết hàng sẽ **biến mất khỏi kết quả tìm** |
-| `publish_time` | ✔ | thời điểm lên kệ (ISO-8601 UTC) |
+
+#### 📥 INPUT — thân yêu cầu là `{"products": [ ... ]}`
+Bọc ngoài: **`products` là một MẢNG**, tối đa **500 sản phẩm/lần gọi** (`main.py:715`, vượt ⇒ `400`).
+Mỗi phần tử theo hợp đồng `Product` (`libs/common/contracts/product.py:35`):
+
+| Trường | Bắt buộc | Kiểu & ràng buộc | Mặc định | Ý nghĩa nghiệp vụ |
+|---|:---:|---|---|---|
+| `id` | **✔** | chuỗi, **chỉ nhận `A-Za-z0-9_.-`**, 1–128 ký tự | — | mã SKU, khoá chính **trong phạm vi tenant**. Có dấu cách hay tiếng Việt ⇒ `400` |
+| `title` | **✔** | chuỗi 1–500, tự chuẩn hoá **NFC** | — | tên hiển thị — **nguồn chính để tìm kiếm** (BM25 + vector + cắt cụm gợi ý) |
+| `price_info` | **✔** | đối tượng (xem dưới) | — | khối giá |
+| `price_info.currency_code` | **✔** | chuỗi **đúng 3 ký tự** | — | `VND` |
+| `price_info.price` | **✔** | số nguyên **≥ 0**, đơn vị nhỏ nhất | — | giá bán. **Số nguyên đồng**, không phải số thực |
+| `price_info.original_price` | | số nguyên ≥ 0, **phải ≥ `price`** | `null` | giá gạch ngang. Nhỏ hơn `price` ⇒ `400` |
+| `description` | | chuỗi ≤ 5000, chuẩn hoá NFC | `null` | mô tả — cũng được đánh chỉ mục (`bm25(description)`) |
+| `categories` | | mảng chuỗi `"Cha > Con"` | `[]` | phần **trước dấu `>` đầu tiên** thành `category_l1` để lọc/gộp/facet |
+| `brands` | | mảng chuỗi | `[]` | dùng cho facet `brands` và lọc `filters.brands` |
+| `availability` | | `IN_STOCK` \| `OUT_OF_STOCK` \| `PREORDER` \| `DISCONTINUED` | **`IN_STOCK`** | khác `IN_STOCK` ⇒ **biến mất khỏi kết quả tìm** (bộ lọc mặc định) |
+| `available_quantity` | | số thực ≥ 0 | `null` | số lượng hiển thị (**không** phải tồn kho dùng để tính nhập hàng) |
+| `attributes` | | đối tượng, **tối đa 50 khoá** | `{}` | thuộc tính tự do; lọc qua `filters.attrs` dạng `"color:do"` |
+| `images` | | mảng `{uri, height?, width?}` | `[]` | `uri` bắt buộc nếu có phần tử |
+| `publish_time` | | ISO-8601 UTC | `null` | thời điểm lên kệ; dùng cho `sort=newest` |
+
+> ⛔ **Đã vá 13/08 — bảng cũ đánh dấu 6 trường là bắt buộc.** Đối chiếu mã (`product.py:35-49`) thì
+> **chỉ có 3**: `id` · `title` · `price_info`. `categories`, `availability`, `publish_time` đều **có giá trị
+> mặc định**. Ghi sai chiều này nguy hiểm cho khách tích hợp: họ tưởng phải chuẩn bị đủ 6 trường mới gọi được,
+> trong khi thực tế đẩy được hàng lên kệ chỉ với 3.
 
 ```bash
 curl -s localhost:16021/v1/products:upsert -H "Authorization: Bearer $SKEY" -H "X-Project-Id: demoshop" -H "Content-Type: application/json" -d '{"products":[{"id":"demo-mi-omachi","title":"Thùng 30 gói mì Omachi sườn hầm ngũ quả 80g","description":"Mì ăn liền Omachi sợi khoai tây, vị sườn hầm ngũ quả, thùng 30 gói 80g","categories":["Bách hóa > Mì ăn liền"],"brands":["Omachi"],"price_info":{"currency_code":"VND","price":145000,"original_price":165000},"availability":"IN_STOCK","available_quantity":40,"attributes":{},"images":[],"publish_time":"2026-08-13T00:00:00Z"}]}'
 ```
 **OUTPUT thật:** `{"upserted":1,"queued_for_index":1}`
+
+#### 📤 RESPONSE — đúng 2 con số, và chúng **cố ý khác nhau**
+
+| Trường | Kiểu | Ý nghĩa | Đọc thế nào |
+|---|---|---|---|
+| `upserted` | số nguyên | số sản phẩm đã **ghi bền vào Postgres** | **đã an toàn**, mất điện cũng không mất |
+| `queued_for_index` | số nguyên | số sản phẩm đã **xếp vào hàng đợi** để đẩy sang Vespa | **chưa tìm được ngay** — còn chờ `vespa_feed` rút |
+
+⭐ **Vì sao tách hai con số?** Vì đó là hai lời hứa khác nhau. `upserted` là *"tôi đã cất hàng vào kho"*;
+`queued_for_index` là *"tôi đã ghi giấy yêu cầu bày lên kệ"*. Nếu Vespa chết, `upserted` vẫn chạy bình thường
+và yêu cầu nằm chờ trong hàng đợi — **sống lại là tự bù**, không mất sản phẩm nào. Một API gộp làm một con số
+sẽ không nói được điều đó.
+
+⚠ `:upsert` **idempotent về dữ liệu nhưng VẪN xếp hàng lại**: gọi lần 2 với đúng nội dung cũ vẫn trả
+`queued_for_index: 1` (đo thật). Nên diễn lại bao nhiêu lần cũng được, không hỏng gì.
 
 ### ③ ĐO SAU — 🆕 **dán MỘT khối, gồm cả lệnh gọi API**
 
@@ -302,14 +335,59 @@ NGAY SAU : products=1  outbox=1     ← BẮT ĐƯỢC HÀNG ĐỢI
 SAU 10s  : products=1  outbox=0     ← indexer đã rút hàng đợi
 ```
 
-### ④ LUỒNG DỮ LIỆU
+### ④ LUỒNG DỮ LIỆU — **một lần gọi, MỘT giao dịch, HAI bảng, rồi BA job nền**
+
 ```
-API :upsert ──ghi ngay──► Postgres products      (bền, không mất)
-            └─xếp hàng──► catalog_outbox ──indexer──► Vespa (tìm kiếm)
+        ┌─────────────────── TRONG CÙNG 1 GIAO DỊCH (atomic) ───────────────────┐
+        │                                                                        │
+POST :upsert ──► ① products        (SỔ CÁI hàng hoá — bền, không mất)            │
+        │        ② catalog_outbox  (HÀNG ĐỢI — "làm ơn đem sản phẩm này đi bày") │
+        └────────────────────────────────────────────────────────────────────────┘
+                            │
+                            │  hai bảng ghi CÙNG LÚC nên không bao giờ lệch:
+                            │  không có cảnh "đã ghi hàng nhưng quên bày"
+                            ▼
+        ┌───────────────────────────────────────────────────────────────────┐
+        │  job vespa_feed  — nhịp 2 GIÂY  (jobs/vespa_feed.py:304)          │
+        │  rút catalog_outbox → đẩy sang Vespa → xoá dòng khỏi hàng đợi     │
+        │  lỗi ⇒ ĐẶT LỊCH THỬ LẠI (next_retry_at), KHÔNG mất yêu cầu        │
+        └───────────────────────────────────────────────────────────────────┘
+                            │
+                            ▼  Vespa index  ⇒ [02] search · [05] ask tìm thấy
+        ┌───────────────────────────────────────────────────────────────────┐
+        │  job embed_backfill — nhịp 300 GIÂY (5 phút)                      │
+        │  đọc products chưa có vector → sinh vector BGE-M3 → nạp vào Vespa │
+        │  đặt products.embedding_version = 1                               │
+        └───────────────────────────────────────────────────────────────────┘
+                            │
+                            ▼  vector  ⇒ [06] similar-products ⇒ [07] cold_start_analog
+        ┌───────────────────────────────────────────────────────────────────┐
+        │  job suggest_terms — nhịp 3600 GIÂY (1 giờ)                       │
+        │  cắt title thành cụm 1-2-3 từ → ghi suggest_terms                 │
+        └───────────────────────────────────────────────────────────────────┘
+                            │
+                            ▼  ⇒ [03] suggest có cụm từ mới
 ```
+
+**Bảng tra: mỗi bảng ai ghi, ghi lúc nào**
+
+| Bảng | Ai ghi | Lúc nào | Loại |
+|---|---|---|---|
+| `products` | **chính API này** | **ngay lập tức**, trong giao dịch | 📕 **SỔ CÁI** — sự thật gốc |
+| `catalog_outbox` | **chính API này** | **ngay lập tức**, cùng giao dịch | 📮 **HÀNG ĐỢI** — dòng bị **xoá** sau khi đẩy xong |
+| Vespa index | job `vespa_feed` | **~2 giây** sau | 🖼 **HÌNH CHIẾU** — xoá sạch vẫn dựng lại được từ `products` |
+| `products.embedding_version` | job `embed_backfill` | **~5 phút** sau | 🖼 hình chiếu |
+| `suggest_terms` | job `suggest_terms` | **~1 giờ** sau | 🖼 hình chiếu |
+
+⭐ **Mẫu hình tên là `transactional outbox`.** Vấn đề nó giải: ghi Postgres và ghi Vespa là **hai hệ thống khác
+nhau**, không thể gói chung một giao dịch. Nếu ghi Postgres xong rồi mới gọi Vespa mà Vespa chết giữa chừng ⇒
+sản phẩm có trong kho nhưng **vĩnh viễn không ai tìm thấy**, và **không ai biết**. Cách chữa: chỉ ghi Postgres,
+nhưng ghi **hai bảng cùng lúc** — bảng thứ hai là tờ giấy nhắc việc. Job nền cứ thế đọc giấy nhắc mà làm, làm
+xong thì xé giấy. Vespa chết bao lâu cũng được, giấy nhắc vẫn nằm đó.
+
 **Nói với khách:** *"Hai con số `upserted` và `queued_for_index` tách nhau có chủ đích. Ghi bền và đánh chỉ mục
 là hai việc khác nhau — Vespa chết thì dữ liệu vẫn còn trong hàng đợi và tự bù khi sống lại. Anh chị vừa nhìn
-thấy hàng đợi lên 1 rồi về 0."*
+thấy hàng đợi lên 1 rồi về 0 — **đó là tờ giấy nhắc việc được viết ra rồi được xé đi.**"*
 
 ### ⏱ CỔNG CHỜ BẮT BUỘC trước khi sang màn 2
 ```bash
@@ -363,19 +441,176 @@ curl -s localhost:16021/v1/search -H "Authorization: Bearer $SKEY" -H "X-Project
 10.2236 | demo-mi-omachi | vespa_bm25
 ```
 
+#### 📥 INPUT — 11 trường, chỉ `query` là bắt buộc (`main.py:996-1096`)
+
+| Trường | Bắt buộc | Kiểu & ràng buộc | Mặc định | Ý nghĩa |
+|---|:---:|---|---|---|
+| `query` | **✔** | chuỗi **không rỗng** | — | câu khách gõ |
+| `page_size` | | số nguyên **1–100** | `20` | số kết quả trả về |
+| `offset` | | số nguyên **≥ 0** | `0` | bỏ qua bao nhiêu kết quả đầu (phân trang) |
+| `sort` | | `relevance` \| `price_asc` \| `price_desc` \| `newest` | `relevance` | ⚠ khác `relevance` thì **tắt trộn RRF** |
+| `filters` | | đối tượng (6 khoá, xem dưới) | — | lọc cứng |
+| `facets` | | mảng — **chỉ nhận `brands`, `category_l1`** | — | đếm nhóm; tên khác ⇒ `400` |
+| `debug` | | luận lý | `false` | mở 6 khối tự-khai đường đi |
+| `user_pseudo_id` | | chuỗi | — | ⭐ **mã người dùng ẩn danh** — điều kiện để chia nhóm A/B |
+| `experiment_id` | | chuỗi | — | đóng dấu lên sổ hiển thị để nối kết quả thí nghiệm |
+| `min_ledger_position` | | số nguyên ≥ 0 | — | **đọc-thấy-ghi**: chờ chỉ mục bắt kịp mốc này rồi hãy trả lời |
+| `wait_timeout_ms` | | số nguyên ≥ 0 | `1000` | chờ tối đa bao lâu cho điều trên |
+
+**`filters` nhận đúng 6 khoá** (`core/vespa_query.py:25-77`):
+
+| Khoá | Kiểu | Ý nghĩa |
+|---|---|---|
+| `price_min` / `price_max` | số nguyên | khoảng giá |
+| `brands` | mảng chuỗi | khớp **bất kỳ** hãng nào trong danh sách (OR) |
+| `categories_prefix` | chuỗi | khớp `category_l1` **hoặc** đường dẫn ngành đầy đủ |
+| `attrs` | mảng chuỗi `"color:do"` | thuộc tính; **phải khớp HẾT** (AND) |
+| `include_unavailable` | luận lý | `false` = **mặc định chỉ trả hàng `IN_STOCK`** |
+
+#### 📤 RESPONSE
+
+| Trường | Kiểu | Ý nghĩa |
+|---|---|---|
+| `items[]` | mảng | kết quả — xem bảng con bên dưới |
+| `total_estimate` | số | **ước lượng** tổng số hàng khớp (không phải số chính xác) |
+| `fuzzy` | luận lý | ⚠ **`true` = Vespa trả 0, đã phải cứu bằng `pg_trgm`** — cờ báo bệnh, xem kỹ kết quả |
+| `relaxed` | luận lý | đã phải **nới điều kiện lọc** mới ra kết quả |
+| `facets` | đối tượng | `{tên_nhóm: [{value, count}]}` — ⚠ **rỗng khi `fuzzy=true`** |
+| `attribution_token` | chuỗi `at_…` | ⭐ **mã phiếu** — gửi kèm khi khách bấm để hệ học xếp hạng (xem ④) |
+| `generated_at` | ISO-8601 | thời điểm tạo kết quả |
+| `consistency` | đối tượng | `is_caught_up` · `projection_watermark` · `ledger_head` |
+| `ranking_debug` | | chỉ khác `null` khi `debug:true` |
+| *(chỉ khi `debug`)* `router` · `rrf` · `intent` · `query_parse` · `ab` | | hệ **tự khai** đã hiểu câu hỏi thế nào |
+
+**Mỗi phần tử `items[]`:**
+
+| Trường | Ý nghĩa |
+|---|---|
+| `product_id` · `title` · `availability` | định danh + tên + còn hàng không |
+| `price_info` | `{currency_code, price}` |
+| `score` | điểm xếp hạng — ⚠ **thang điểm PHỤ THUỘC `source`**, xem dưới |
+| `source` | **đường nào đưa món này lên** — 6 giá trị |
+| `rating_avg` · `rating_count` | điểm đánh giá (gắn thêm sau) |
+
+⭐ **`source` — đọc được là hiểu hệ đang khoẻ hay đang chống chế:**
+
+| `source` | Nghĩa | Thang `score` | Sức khoẻ |
+|---|---|---|---|
+| `vespa_bm25` | chỉ khớp chữ (router chọn nhánh từ khoá) | **hàng đơn vị** (~10) | ✅ bình thường |
+| `vespa_hybrid` | chữ + vector | hàng đơn vị | ✅ bình thường |
+| `rrf_fusion` | đã trộn 2 bảng xếp hạng | **hàng phần trăm** (~0.03) | ✅ bình thường |
+| `merch_pin` | do người vận hành **ghim tay** | `0.0` | ✅ chủ ý |
+| `pg_trgm_fuzzy` | Vespa ra 0 ⇒ dò gần đúng trong Postgres | 0–1 | ⚠ **suy giảm** |
+| `pg_fts_fallback` | **Vespa CHẾT** ⇒ tìm toàn văn Postgres | tuỳ | 🔴 **sự cố** — kèm header `X-Degraded: vespa_unavailable` |
+
+> ⛔ **Đừng so `score` giữa hai `source` khác nhau.** `10.22` của `vespa_bm25` và `0.0325` của `rrf_fusion`
+> **không cùng thang đo** — RRF cho điểm theo công thức `1/(60+thứ_hạng)` nên luôn nhỏ hơn 1. Cao hơn không
+> có nghĩa là tốt hơn; chỉ so được **trong cùng một lần gọi**.
+
 ### ③ ĐO SAU
 ```bash
 sleep 2; q miniai_search "SELECT cnt AS lan_tim, results_count_last AS so_kq FROM query_log WHERE project_id='demoshop' AND query_norm='omachi';"
 ```
 **Đo thật:** `1 | 1` — **truy vấn của khách đã được ghi sổ**.
 
-### ④ LUỒNG
+### ④ LUỒNG — **7 chặng đi, rồi ghi HAI cuốn sổ khác nhau**
+
+> ⛔ **Đã vá 13/08 — mũi tên cũ gộp sai.** Bản cũ viết `ghi query_log ──► nuôi gợi ý gõ phím + học xếp hạng`.
+> Đúng nửa đầu, **sai nửa sau**: grep toàn mã, `query_log` chỉ có **3 nơi đọc** (`suggest_terms.py:94`,
+> `drift.py:45`, và `grounding.py:219` — chỗ này chỉ dùng chữ `"query_log"` làm từ khoá bắt lộ prompt, không
+> đọc bảng). **Học xếp hạng KHÔNG đọc `query_log` một dòng nào** — nó đi bằng `attribution` → `click_log`.
+> Hai sổ ghi cùng lúc trong cùng một lần gọi (`main.py:1594-1602`) nên bản cũ tưởng là một.
+
+#### Chặng đi — từ lúc nhận câu hỏi tới lúc trả kết quả
+
 ```
-/v1/search ──► Vespa (BM25 + vector) ──► RRF trộn điểm ──► trả kết quả
-           └──► ghi query_log (cnt++)  ──► nuôi gợi ý gõ phím + học xếp hạng
+câu khách gõ
+   │
+   ├─① query_parse   — rút RÀNG BUỘC ra khỏi câu chữ
+   │     "tã cho bé 6 tháng dưới 300k" → price_max=300000, còn lại "tã cho bé 6 tháng"
+   │
+   ├─② parse_intent  — hiểu Ý ĐỊNH: ngành · đối tượng · dịp · phủ định
+   │     nhận ra "cho bé" ⇒ audience=tre-em ⇒ TỰ CHẶN ngành bia/rượu
+   │
+   ├─③ router        — chọn đường, KHÔNG dùng LLM, chạy cục bộ <10ms
+   │     p_semantic < 0.25 ⇒ "keyword": BỎ QUA bước mã hoá vector (tiết kiệm)
+   │     ngược lại        ⇒ "semantic": có mã hoá ⇒ tìm được cả theo nghĩa
+   │
+   ├─④ Vespa lượt 1  — hồ sơ "hybrid" (chữ + vector), lấy tối đa 100 ứng viên
+   │        └─ Vespa NÉM LỖI ⇒ 🔴 rơi thẳng xuống PG FTS, gắn header X-Degraded
+   │        └─ Vespa trả 0   ⇒ ⚠ dò gần đúng pg_trgm  (fuzzy=true)
+   │
+   ├─⑤ Vespa lượt 2  — hồ sơ "bm25" thuần (CHỈ khi sort=relevance và có vector)
+   │        └─ RRF trộn 2 bảng xếp hạng:  điểm = Σ 1/(60 + thứ_hạng)
+   │           vì sao trộn: chữ và nghĩa BẮT ĐƯỢC HAI LOẠI SAI KHÁC NHAU
+   │
+   ├─⑥ intent_rerank — nhân hệ số theo ý định (đẩy đúng ngành lên, dìm lệch ngành)
+   ├─⑦ merch rules   — luật người vận hành đặt tay: GHIM / ĐẨY / DÌM
+   │
+   └─► items[]  +  attribution_token = "at_" + 32 ký tự ngẫu nhiên
 ```
-**Nói với khách:** *"Sản phẩm tạo chưa tới 1 phút đã tìm được. Và mỗi lần khách tìm, hệ ghi lại — đó là nguyên
-liệu để ngày mai gợi ý thông minh hơn."*
+
+#### Ghi sổ — **HAI cuốn, hai mục đích, đừng gộp**
+
+```
+                          ┌──────────────────────────────────────────────────────────┐
+                          │ 📕 SỔ 1: query_log     — "KHÁCH ĐÃ HỎI GÌ"               │
+   ┌──────────────────────┤   khoá: (project_id, query_norm)                          │
+   │                      │   cnt++         = số LƯỢT gõ câu này                      │
+   │                      │   user_cnt++    = số NGƯỜI khác nhau (chỉ khi có          │
+   │                      │                   user_pseudo_id VÀ khác lần trước)       │
+   │                      └──────────────────────────────────────────────────────────┘
+   │                                          │
+   │                                          ├──► job suggest_terms (1 GIỜ) ──► GỢI Ý GÕ PHÍM
+   │                                          │      nhưng phải qua 4 CỔNG, xem [03]
+   │                                          │
+   │                                          └──► job drift (PSI độ dài câu) ──► CẢNH BÁO TRÔI
+   │
+1 lần gọi
+   │
+   │                      ┌──────────────────────────────────────────────────────────┐
+   └──────────────────────┤ 📗 SỔ 2: attribution   — "TÔI ĐÃ BÀY RA NHỮNG GÌ"        │
+                          │   token = at_xxx                                          │
+                          │   query_norm + product_ids[]  ← DANH SÁCH ĐẦY ĐỦ, CÓ THỨ TỰ│
+                          └──────────────────────────────────────────────────────────┘
+                                                     │
+                       khách bấm 1 món, web gửi event product.clicked KÈM at_xxx
+                                                     │
+                                                     ▼
+                          ┌──────────────────────────────────────────────────────────┐
+                          │ job click-join (300 GIÂY) — learning_jobs.py:68           │
+                          │   tra ngược at_xxx → biết SERP hôm đó có gì               │
+                          │   ghi click_log:  món ĐƯỢC bấm      → label = 1           │
+                          │                   MỌI món khác      → label = 0 (+ vị trí)│
+                          └──────────────────────────────────────────────────────────┘
+                                                     │
+                                                     ▼
+                          build_ltr_dataset → train_ltr → HỌC XẾP HẠNG (LTR)
+```
+
+⭐⭐ **Vì sao BẮT BUỘC phải có sổ 2, không thể dùng sổ 1?**
+Muốn dạy máy xếp hạng, biết *"khách bấm món A"* là **chưa đủ**. Phải biết **lúc đó máy đã bày ra những món
+nào và A đứng thứ mấy** — vì **món KHÔNG được bấm cũng là bài học** (ví dụ âm). `query_log` chỉ lưu **câu chữ
+và con số đếm**, không lưu danh sách sản phẩm, nên nó **không thể** làm việc này.
+
+> 💡 Chú thích trong `learning_jobs.py:132-138` ghi lại một **bài học đã trả giá**: bản cũ chỉ ghi các món
+> nằm **phía trên** chỗ bấm. Hậu quả — vị trí sâu gần như chỉ còn dòng được-bấm ⇒ tỉ lệ bấm ở vị trí sâu
+> **bị thổi phồng** ⇒ bộ chấm đo ra `est(pos10) = 3.57` trên thế giới mô phỏng cài sẵn `0.16`, **sai hơn 20 lần**.
+
+#### ⚠ Trạng thái THẬT trên `demoshop` hôm nay (đo 13/08)
+
+| Đường | Số đo | Kết luận |
+|---|---|---|
+| `query_log` → gợi ý gõ phím | 47 dòng → 28 qua cổng ① → **0 qua cổng k-anon** | ❌ **chưa từng chạy** — mọi cụm gợi ý đến từ tiêu đề |
+| `attribution` → học xếp hạng | `attribution` **686** dòng, `click_log` **0** dòng | ❌ **ống rỗng** — chưa cú bấm nào được nạp về |
+
+Cả hai **cùng một nguyên nhân**: không lệnh gọi nào gửi `user_pseudo_id`, mà đó là trường **tuỳ chọn**.
+Không có nó ⇒ `user_cnt` đứng yên ở 0 (k-anon đòi ≥ 5) **và** `bucket` là `null` (A/B không chia).
+(Nợ đã ghi sổ: `W-SUGGEST-QLOG-SOURCE-B-DEAD`.)
+
+**Nói với khách:** *"Sản phẩm tạo chưa tới 1 phút đã tìm được. Và mỗi lần khách tìm, hệ ghi **hai** cuốn sổ:
+một cuốn ghi **khách hỏi gì** để mai gợi ý gõ phím thông minh hơn, một cuốn ghi **tôi đã bày ra gì, ở vị trí
+nào** — cuốn thứ hai mới là thứ dạy máy xếp hạng, vì món khách **bỏ qua** cũng là thông tin."*
 
 > ⚠ **Truy vấn nên dùng:** `omachi` (tên thương hiệu). **Tránh** `mi omachi` / `mi an lien`: bỏ dấu, "mi"
 > 2 ký tự khớp cả "sơ **mi**" nên hàng mới bị đẩy xuống. Điểm yếu đã đo, đã ghi sổ (`W-SEARCH-CONCEPT-NEGATION`).
@@ -430,6 +665,32 @@ curl -s "localhost:16021/v1/suggest?q=omachi&limit=5" -H "Authorization: Bearer 
                  "is_caught_up": true, "ledger_head": 1079633}}
 ```
 
+#### 📥 INPUT — **`GET`, tham số trên URL**, chỉ có 2 (`main.py:1970-1987`)
+
+| Tham số | Bắt buộc | Ràng buộc | Mặc định | Ý nghĩa |
+|---|:---:|---|---|---|
+| `q` | **✔** | chuỗi không rỗng | — | vài ký tự khách vừa gõ. Thiếu/rỗng ⇒ `400` |
+| `limit` | | số nguyên **1–20** | `8` | số cụm trả về. Ngoài khoảng ⇒ `400` |
+
+> 💡 **Gõ tay dễ hỏng dấu tiếng Việt.** Dùng `--get --data-urlencode` thay vì nhét thẳng `?q=sữa` vào URL:
+> ```bash
+> curl -s --get "localhost:16021/v1/suggest" --data-urlencode "q=sữa" --data-urlencode "limit=5" \
+>   -H "Authorization: Bearer $SKEY" -H "X-Project-Id: demoshop"
+> ```
+
+#### 📤 RESPONSE — **chỉ 2 khoá; trả CHỮ, không trả HÀNG**
+
+| Trường | Kiểu | Ý nghĩa |
+|---|---|---|
+| `items[].text` | chuỗi | cụm từ gợi ý — **bản CÓ DẤU** (dù khách gõ không dấu) |
+| `items[].weight` | số thực | độ ưu tiên, sắp giảm dần. **Chỉ tăng theo thời gian**, xem ④ |
+| `consistency` | đối tượng | `is_caught_up` · `projection_watermark` · `ledger_head` · `data_as_of` |
+
+⚠ **Không có `product_id`, không có giá, không có `score`.** Đây là API **trả chuỗi chữ** để đổ vào ô gợi ý —
+khách bấm vào một cụm thì giao diện mới gọi tiếp `[02] /v1/search` với cụm đó.
+
+⚠ **Không khớp ⇒ `{"items": []}` kèm HTTP `200`**, không phải lỗi. Ô gợi ý chỉ im lặng.
+
 ### ③ ĐO SAU — đối chiếu số của API với số trong kho
 ```bash
 q miniai_search "SELECT term, round(weight::numeric,2) FROM suggest_terms WHERE project_id='demoshop' AND term LIKE '%omachi%' ORDER BY weight DESC;"
@@ -444,11 +705,85 @@ q miniai_search "SELECT term, round(weight::numeric,2) FROM suggest_terms WHERE 
 > ```
 > Phải ép `::numeric` trước. Cùng lỗi này còn ở **DEMO-2 bước [03] và [04]** — đã vá cả hai.
 
-### ④ LUỒNG
+### ④ LUỒNG — **API này KHÔNG tìm kiếm gì cả; job mới là nơi có việc**
+
+⭐ **Điều bất ngờ nhất:** toàn bộ thân hàm chỉ là **MỘT câu SQL** (`main.py:1997-2009`) — không đụng Vespa,
+không mã hoá vector, không mô hình:
+```sql
+SELECT term, weight FROM suggest_terms
+WHERE project_id = $1 AND term_unaccent LIKE $2 || '%'      -- ⭐ KHỚP TIỀN TỐ
+ORDER BY weight DESC LIMIT $3
 ```
-products.title ──job suggest_terms (mỗi 1 GIỜ)──► suggest_terms ──► /v1/suggest
-query_log.cnt  ─────────────────────────────────┘  (độ phổ biến nâng weight lên)
+Vì thế nó **chỉ vài mili-giây** — bắt buộc phải vậy, vì khách gõ **mỗi phím là một lần gọi**.
+
+**Hệ quả của `LIKE 'xxx%'` — khách sẽ hỏi:** gõ `omachi` ra được `omachi sườn hầm`, nhưng **không** ra
+`mì omachi` (cụm đó chỉ *chứa*, không *bắt đầu bằng*). Muốn ra nhóm kia thì gõ `mi`.
+
+#### Bảng `suggest_terms` được nuôi từ **HAI nguồn**, job chạy mỗi **1 GIỜ**
+
 ```
+┌── NGUỒN (a): CẮT TIÊU ĐỀ SẢN PHẨM ──────────────────────────────────────┐
+│  products.title ──► _ngrams(title, max_n=3) ──► mọi cụm 1, 2, 3 từ      │
+│  weight = 1.0 + popularity.score_7d                                     │
+│  lọc: bỏ cụm < 2 ký tự · bỏ cụm dính từ cấm · bỏ SKU canary bảo mật     │
+└─────────────────────────────────────────────────────────────────────────┘
+                                                     ├──► suggest_terms
+┌── NGUỒN (b): HỌC TỪ CÂU KHÁCH ĐÃ GÕ ────────────────────────────────────┐
+│  query_log ──① cnt≥2 VÀ results_count_last>0                            │
+│            ──② KHÔNG dính PII (email · SĐT VN · CMND/CCCD · số thẻ)     │
+│            ──③ KHÔNG dính từ cấm (40 từ, khớp bản CÓ DẤU)               │
+│            ──④ user_cnt ≥ 5   ◄── k-ANONYMITY                           │
+│  weight = 10.0 × cnt        (gấp 10 để câu KHÁCH GÕ THẬT thắng cụm máy) │
+└─────────────────────────────────────────────────────────────────────────┘
+
+trộn 2 nguồn:  weight = GREATEST(cũ, mới)   ← ⚠ CHỈ TĂNG, KHÔNG BAO GIỜ GIẢM
+```
+
+**Bốn cổng của nguồn (b) — thứ tự là HỢP ĐỒNG** (ADR-012, `core/suggest_privacy.py`):
+
+| Cổng | Chặn gì | Vì sao |
+|---|---|---|
+| ① `cnt≥2` + có kết quả | câu gõ đúng 1 lần, hoặc câu **ra 0 hàng** | gợi ý dẫn khách tới trang trắng là phản tác dụng |
+| ② PII | email · SĐT VN · CMND 9 số / CCCD 12 số · số thẻ | **loại CẢ CỤM, không che** — che vẫn lộ cấu trúc |
+| ③ Blocklist | 40 từ tục / người lớn / chất cấm | cố ý **không** khớp bản không dấu, để `"lon bia"` vẫn hợp lệ |
+| ④ **k-anonymity ≥ 5 người** | câu **ít người gõ** | ⭐ câu hiếm là **dấu vân tay** của một người. Đưa `"thuốc tiểu đường cho mẹ"` lên ô gợi ý công khai = **bán đứng người đó** |
+
+#### ⭐ Cắt tiêu đề ra 6 cụm — tính tay được, đúng con số bước ① đo ra
+
+```
+"thùng 30 gói mì omachi sườn hầm ngũ quả 80g"
+  1 từ : omachi
+  2 từ : mì omachi · omachi sườn
+  3 từ : gói mì omachi · mì omachi sườn · omachi sườn hầm
+  ⇒ ĐÚNG 6 cụm chứa "omachi"     (khớp con số 6 dòng đo được trong DB)
+  ⇒ API chỉ trả 3 cụm BẮT ĐẦU bằng "omachi"     (khớp 3 dòng response)
+```
+
+#### ⚠ `weight` **chỉ đi lên, không có cơ chế quên**
+
+`ON CONFLICT ... weight = GREATEST(suggest_terms.weight, EXCLUDED.weight)` — nó là **mức nước cao nhất từng
+đạt**. Một cụm từng hot mùa Tết sẽ **giữ điểm cao đó mãi mãi**, kể cả khi không ai tìm nữa. Đây giải thích vì
+sao con số trong tài liệu chỉ tăng: `334.8` (07/08) → `376.96` (12/08) → `401.28` (13/08).
+
+#### ⚠ Đo thật `demoshop` 13/08 — **nguồn (b) CHƯA TỪNG CHẠY**
+
+| Phép đo | Kết quả |
+|---|---|
+| `query_log` của `demoshop` | 47 dòng |
+| qua cổng ① | 28 dòng |
+| qua cổng ④ (k-anon) | **0 dòng** |
+| `user_cnt` của cả 47 dòng | **đều bằng 0** |
+| cụm trong `suggest_terms` có `weight` là bội số của 10 | **0 / 1.746** |
+
+Nguồn (b) luôn sinh `weight = 10 × cnt`, tức **luôn chia hết cho 10**. Không cụm nào như vậy ⇒ **100% gợi ý
+hiện tại đến từ nguồn (a) — cắt tiêu đề.** Nguyên nhân: `user_pseudo_id` là trường **tuỳ chọn** mà không lệnh
+gọi nào truyền ⇒ `user_cnt` mãi bằng 0 ⇒ không bao giờ với tới ngưỡng 5.
+**Ngưỡng k-anon = 5 không sai** — hỏng ở **khớp nối**. (Nợ: `W-SUGGEST-QLOG-SOURCE-B-DEAD`.)
+
+> ⛔ **Đã vá 13/08 — mũi tên cũ ghi `query_log.cnt (độ phổ biến nâng weight lên)` là SAI trên sân demo.**
+> Trên `demoshop` `query_log` **chưa nâng dòng nào**. Con số `~400` của cụm `"mì hảo hảo"` đến từ
+> `1 + popularity.score_7d` của **nguồn (a)**, không phải từ lượt tìm của khách.
+
 **Điểm khoe:** `is_caught_up: true` nghĩa là **dữ liệu trả về đã bắt kịp sổ cái**
 (`projection_watermark == ledger_head`) — khách biết mình đang nhìn số mới nhất.
 `weight = 1.0` = hàng mới chưa ai tìm. **So với DEMO-2: cụm "mì hảo hảo" có weight ~400** — đó là giá trị
@@ -480,6 +815,41 @@ curl -s localhost:16021/v1/recommend -H "Authorization: Bearer $SKEY" -H "X-Proj
 source: reco_pdp
 ```
 
+#### 📥 INPUT (`main.py:2042-2090`)
+
+| Trường | Bắt buộc | Ràng buộc | Mặc định | Ý nghĩa |
+|---|:---:|---|---|---|
+| `context` | **✔** | **7 giá trị đóng**: `home` · `pdp` · `similar` · `cart` · `session` · `similar_items` · `also_viewed` | — | ⭐ **khách đang đứng ở đâu** — quyết định toàn bộ thuật toán bên dưới |
+| `product_id` | tuỳ `context` | chuỗi | — | **bắt buộc trên thực tế** với `pdp`/`similar`/`similar_items` — không có thì không biết "giống cái gì" |
+| `user_pseudo_id` | | chuỗi | — | có thì hệ **loại hàng người này đã mua** và pha thêm hồ sơ cá nhân |
+| `page_size` | | số nguyên **1–24** | `12` | ⚠ trần **24**, hẹp hơn `/v1/search` (100) |
+| `experiment_id` | | chuỗi | — | đóng dấu lên sổ hiển thị |
+
+**`context` khác nhau ⇒ nguồn gợi ý khác hẳn:**
+
+| `context` | Khách đang ở | Trả lời câu hỏi |
+|---|---|---|
+| `home` | trang chủ | *"chưa biết định mua gì — bày gì cho người NÀY?"* |
+| `pdp` | trang chi tiết sản phẩm | *"đang xem món này, gợi thêm gì?"* |
+| `cart` | giỏ hàng | *"sắp thanh toán, mua kèm gì?"* |
+| `similar_items` / `similar` | khối "sản phẩm tương tự" | *"món nào GIỐNG món này?"* |
+| `also_viewed` | khối "người khác cũng xem" | *"ai xem món này còn xem gì?"* |
+| `session` | trong phiên duyệt | *"theo mạch vừa xem thì tiếp gì?"* |
+
+#### 📤 RESPONSE
+
+| Trường | Ý nghĩa |
+|---|---|
+| `items[]` | `product_id` · `title` · `price_info` · `availability` · `score` · `source` · `rating_avg` · `rating_count` |
+| `fallback` | ⚠ **`null` = đi đúng đường chính**; có giá trị (vd `"popularity"`) = **đã phải chống chế** |
+| `attribution_token` | mã phiếu — như `[02]`, để nối cú bấm về sau |
+| `generated_at` | thời điểm tạo |
+
+⭐ **`fallback` là trường đáng nhìn nhất.** Nó thú nhận hệ có tìm được gợi ý *thật* hay chỉ đang bày hàng bán
+chạy cho có. `"popularity"` nghĩa là *"tôi không biết gợi gì cho món này, nên bày hàng bán chạy toàn shop"*.
+
+⚠ **`score` ở đây thang 0–1** (nấc nội dung), **không phải** thang trăm như bản 07/08 ghi.
+
 ### ③ ĐO SAU
 ```bash
 sleep 2; q miniai_search "SELECT count(*) AS luot_hien_thi FROM reco_exposure WHERE project_id='demoshop';"
@@ -498,14 +868,69 @@ q miniai_search "SELECT product_id, position FROM (SELECT product_id, position, 
 > ⚠ Con số nền `reco_exposure` **lớn dần mãi** (1562 ngày 12/08 → 2100 ngày 13/08) vì bảng chỉ-ghi-thêm.
 > Đọc từ màn hình, chỉ cần **hiệu số +12** là đúng.
 
-### ④ LUỒNG
+### ④ LUỒNG — **bậc thang tụt dần, tụt tới đâu tự khai tới đó**
+
+#### Đường chính (hàng ĐÃ CÓ hành vi) — trộn 2 nguồn theo tỉ lệ 60/40
+
 ```
-/v1/recommend ──► bậc thang cold-start ──► trả gợi ý
-              └──► ghi reco_exposure (1 dòng/sản phẩm, kèm VỊ TRÍ)
-                          └──► ghép với click_log ──► khử thiên lệch vị trí khi học xếp hạng
+context=pdp, product_id=X
+   │
+   ├─ nguồn A (60%): bought_together   — "ai mua X thường mua kèm gì"  (bảng co_occurrence)
+   ├─ nguồn B (40%): similar-NN        — "món nào GẦN X nhất"          (vector Vespa)
+   │
+   ├─ loại bỏ: chính X + mọi món user này ĐÃ MUA
+   └─► mix_sources(A, B, ratio=0.6) ──► items[],  fallback = null   ✅
 ```
-**Nói với khách:** *"Vị trí #1 là mì Hảo Hảo — **đúng ngành mì ăn liền**. Và hệ ghi lại chính xác nó đã hiện
-cái gì ở vị trí nào; không có con số này thì mọi phép học sau đó đều thiên lệch."*
+
+#### Đường cold-start (hàng MỚI, 0 hành vi) — **bậc thang 3 nấc, `main.py:2254-2330`**
+
+```
+A rỗng VÀ B rỗng  ⇒  tụt xuống bậc thang:
+
+  NẤC 1 ── similar_by_content — CÙNG NGÀNH, so bằng nội dung
+  │         ⭐ CHỈ dùng Postgres ⇒ SỐNG cả khi Vespa chết VÀ máy tạo vector chết
+  │         có kết quả ⇒ fallback = null (đây là gợi ý THẬT, không phải chống chế)
+  │
+  ├─ rỗng ─► NẤC 2 ── hàng bán chạy TRONG CÙNG NGÀNH của X
+  │                    (so ngành không phân biệt dấu — W-CAT-L1-DIACRITICS)
+  │
+  └─ rỗng ─► NẤC 3 ── hàng bán chạy TOÀN SHOP   ⚠ fallback = "popularity"
+                       CHỐT CUỐI — chấp nhận lệch ngành còn hơn trả rỗng
+```
+
+> ⭐ **Vì sao phải có nấc 1 và 2 — bài học đo được 06/08:** trước đây hàng mới **tụt thẳng xuống nấc 3**, và
+> trang chi tiết một cái **tai nghe** đi gợi ý *miếng dán màn hình · kem chống nắng · tất*. Đúng "hàng bán
+> chạy", nhưng vô nghĩa với người đang xem tai nghe. Thêm 2 nấc trên là để **lệch ngành trở thành lựa chọn
+> cuối cùng, không phải lựa chọn đầu tiên**.
+
+#### Ghi sổ — **1 dòng cho MỖI sản phẩm, kèm VỊ TRÍ**
+
+```
+trả về 12 sản phẩm
+        │
+        └──► reco_exposure: 12 DÒNG, position = 0,1,2,…,11    ⚠ ĐÁNH SỐ TỪ 0
+                    │        (store/reco.py:358 — best-effort, không bao giờ làm hỏng API)
+                    │
+                    ├──► ghép click_log ──► khử THIÊN LỆCH VỊ TRÍ khi học xếp hạng
+                    └──► store/bandit.py ──► đếm lượt hiển thị cho thuật toán khám phá
+```
+
+⭐⭐ **Vì sao phải ghi `position`?** Vì **món ở vị trí #1 luôn được bấm nhiều hơn**, kể cả khi nó không hay
+hơn món ở #8 — đơn giản vì khách **nhìn thấy nó trước**. Nếu chỉ ghi *"món này được bấm"* mà không ghi
+*"nó nằm ở đâu"*, máy sẽ học đúng một bài vô dụng: **"cái gì đang ở trên thì cho lên trên"** — nó học thuộc
+chính nó. Có `position` mới quy đổi được về cùng mặt bằng: **một cú bấm ở vị trí ít ai nhìn đáng giá hơn
+nhiều một cú bấm ở #1**.
+
+| Bảng | Ai ghi | Khi nào | Loại |
+|---|---|---|---|
+| `reco_exposure` | **chính API này** | ngay, mỗi lần gọi | 📕 **chỉ-ghi-thêm** — lớn dần mãi, đọc **hiệu số** chứ đừng đọc tổng |
+| `co_occurrence` | job `cooc` | mỗi **86.400 giây** (1 ngày) | 🖼 hình chiếu |
+| `popularity` | job `popularity` | mỗi **3.600 giây** (1 giờ) | 🖼 hình chiếu |
+| `user_profile` | job `user_profile` | mỗi **300 giây** | 🖼 hình chiếu |
+
+**Nói với khách:** *"Vị trí #1 là mì Hảo Hảo — **đúng ngành mì ăn liền**, dù sản phẩm này mới sinh ra 5 phút
+trước và chưa ai xem. Và hệ ghi lại chính xác nó đã hiện cái gì **ở vị trí nào** — không có con số vị trí đó
+thì mọi phép học sau này đều thiên lệch, vì máy sẽ tưởng thứ nằm trên là thứ tốt."*
 
 ---
 ## [05] POST /v1/ask — hỏi tự nhiên, có chặn bịa đặt
@@ -542,6 +967,42 @@ curl -s localhost:16021/v1/ask -H "Authorization: Bearer $SKEY" -H "X-Project-Id
    "dropped_ids": ["dt-banphim-akko", "mb-yem-andam", "tt-quanjean-nam-slim", "bh-dauan-neptune"]}}
 ```
 
+#### 📥 INPUT — chỉ **2 trường** (`main.py:1671-1691`)
+
+| Trường | Bắt buộc | Ràng buộc | Mặc định | Ý nghĩa |
+|---|:---:|---|---|---|
+| `question` | **✔** | chuỗi không rỗng | — | câu hỏi bằng lời thường |
+| `page_size` | | số nguyên **1–20** | `5` | số ứng viên lấy về. ⚠ trần **20**, hẹp hơn `/v1/search` (100) |
+
+⚠ **Không nhận `filters`, `sort`, `user_pseudo_id`.** Dù bên trong nó gọi chính `/v1/search` (xem ④), API này
+**không mở** các tham số đó ra ngoài — mọi ràng buộc phải suy ra từ câu chữ.
+
+#### 📤 RESPONSE — 8 trường, trong đó **3 là lời TỰ KHAI**
+
+| Trường | Kiểu | Ý nghĩa |
+|---|---|---|
+| `answer` | chuỗi | **câu văn** — thứ duy nhất hiển thị cho khách |
+| `answer_source` | `llm` \| `template` | ⭐ nguồn thật của **chuỗi ở trên** |
+| `llm_used` | luận lý | LLM **có chạy** không — khác `answer_source` khi câu bị guard vứt |
+| `grounding_guard` | đối tượng | `blocked` · `ungrounded_ids` · `findings` — lưới chống **BỊA MÃ HÀNG** |
+| `answer_coherence` | đối tượng | `filtered` · `dropped_ids` — lưới chống **LỆCH NGÀNH** |
+| `items[]` | mảng | ứng viên **NGUYÊN VẸN**, y hệt item của `/v1/search` |
+| `attribution_token` | chuỗi | ⭐ **mượn lại của `/v1/search`** — dấu vân tay chứng minh nó gọi ngược vào trong |
+| `generated_at` | ISO-8601 | thời điểm |
+
+⭐⭐ **Đọc CẶP `llm_used` × `answer_source` mới thấy hết:**
+
+| `llm_used` | `answer_source` | Nghĩa |
+|:---:|:---:|---|
+| `false` | `template` | không cấu hình LLM (hoặc 0 ứng viên) ⇒ khuôn máy dựng câu |
+| `true` | `llm` | LLM viết câu và **đã qua** 4 chốt kiểm |
+| `true` | **`template`** | ⚠ **LLM đã viết nhưng bị guard VỨT** — khuôn máy gánh thay |
+
+Dòng cuối là điểm khoe: hệ **không giấu** việc mô hình ngôn ngữ vừa bị chặn.
+
+⚠⚠ **`items` KHÔNG bị lọc; chỉ `answer` bị lọc.** Đây là chủ ý — giữ nguyên độ phủ cho giao diện, chỉ siết
+**cái được phép NÓI RA**. Nên `items` có 3 mà `answer` nêu 2 là **đúng thiết kế**, không phải lỗi.
+
 ### ③ ĐO SAU — chứng minh 4 sản phẩm bị loại là có thật
 ```bash
 q miniai_search "SELECT product_id, category_l1 FROM products WHERE project_id='demoshop' AND product_id IN ('dt-banphim-akko','mb-yem-andam','tt-quanjean-nam-slim','bh-dauan-neptune');"
@@ -550,15 +1011,79 @@ sleep 2; q miniai_search "SELECT query_norm, cnt FROM query_log WHERE project_id
 **Đo thật:** 4 SKU đó thuộc **4 ngành khác nhau** (Điện tử, Mẹ & bé, Thời trang, Bách hóa-dầu ăn) — bộ lọc
 đã loại đúng hàng lệch ngành, chỉ giữ mì. Câu hỏi cũng được ghi vào `query_log`.
 
-### ④ LUỒNG — 3 tầng bảo vệ
+### ④ LUỒNG — **`ask` KHÔNG có động cơ tìm riêng; nó GỌI NGƯỢC vào `/v1/search`**
+
+⭐ **Điều bất ngờ nhất, và cũng là câu khách hay hỏi nhất** (*"ba API `search`/`suggest`/`ask` khác gì nhau?"*):
+`/v1/ask` mở một kết nối HTTP **gọi ngược vào chính service mình** (`main.py:1699-1704`):
+
+```python
+resp = await client.post(f"{self_base}/v1/search",
+                         json={"query": question, "page_size": page_size}, ...)
 ```
-câu hỏi ──► retrieval (tìm ứng viên)
-        ──► grounding_guard : mã hàng không có thật ⇒ CHẶN, rơi về khuôn an toàn
-        ──► answer_coherence: sản phẩm lệch ngành  ⇒ LOẠI khỏi câu trả lời
-        ──► answer + tự khai answer_source (template | llm)
+
+Bằng chứng nhìn thấy được: `items[].source` trong kết quả `ask` mang đúng `rrf_fusion` / `vespa_bm25` —
+**dấu vân tay của `/v1/search`** — và `attribution_token` cũng là mã phiếu do `/v1/search` cấp.
+
+> **Vậy `ask` = `search` + phễu lọc + người phát ngôn.** Chất lượng của `ask` **không bao giờ vượt được**
+> chất lượng `search` bên dưới; nó chỉ có thể *bỏ bớt* thứ sai và *diễn đạt* cho dễ nghe.
+
 ```
+question "shop co ban mi an lien khong?"
+   │
+   ├─① SELF-CALL POST /v1/search   ⚠ đẩy NGUYÊN VĂN cả câu hỏi làm truy vấn
+   │     → hưởng trọn: query_parse · intent · router · RRF · rerank · merch
+   │     → và cũng GHI query_log + attribution y như [02]
+   │     → lỗi ≠ 200 ⇒ 502 INTERNAL (không giả vờ trả lời)
+   │
+   ├─② LÀM GIÀU NGÀNH — đọc products lấy categories cho ứng viên còn thiếu
+   │
+   ├─③ 🛡 answer_coherence  (kill-switch: ASK_ANSWER_COHERENCE=0)
+   │     parse_intent(question) → ngành mong đợi
+   │     loại khỏi DANH SÁCH ĐƯỢC NÓI mọi món lệch ngành → dropped_ids
+   │     ⚠ intent không ra được ngành ⇒ intent_cat=None ⇒ KHÔNG LỌC GÌ
+   │     lỗi/PG chết ⇒ bỏ qua, quay về hành vi cũ (không bao giờ giết API)
+   │
+   ├─④ DỰNG CÂU — hai nhánh
+   │     có LLM_API_KEY ─► gọi LLM (timeout 10s, max_tokens 220, temp 0.4)
+   │     │                  └─🛡 grounding_guard HẬU KIỂM 4 chốt:
+   │     │                      mã hàng bịa? · lộ prompt? · … → dính 1 chốt là VỨT
+   │     │                      (guard lỗi ⇒ FAIL-CLOSED: coi như không đạt)
+   │     └─ không / bị vứt ─► KHUÔN MÁY: "Gợi ý cho bạn:" + 3 dòng đầu
+   │                          ⚠ khuôn chỉ được nêu answer_items (đã lọc), KHÔNG phải items
+   │
+   └─► answer + 3 trường tự khai + items NGUYÊN VẸN
+```
+
+**Hai lưới bảo vệ — phân vai rõ, và biết giới hạn của chúng:**
+
+| Lưới | Chặn cái gì | Chạy khi nào | Điểm mù |
+|---|---|---|---|
+| `grounding_guard` | LLM **bịa mã hàng** không có trong kho / lộ prompt hệ thống | chỉ khi **LLM có chạy** | không chặn được món **có thật nhưng lạc đề** |
+| `answer_coherence` | món **lệch ngành** so với ý định câu hỏi | luôn (trừ khi tắt bằng env) | **`intent_cat = None` ⇒ không lọc gì** |
+
+#### ⚠⚠ LỖI THẬT — đo 13/08, tái lập 2/2 lần: hỏi món shop KHÔNG BÁN
+
+```
+Hỏi : "shop co ban xe may dien VinFast khong?"
+Trả : Gợi ý cho bạn:
+      1. Bàn phím cơ Akko 3068B Plus (1.790.000đ)
+      2. Máy lọc không khí Xiaomi Air Purifier 4 Lite (2.790.000đ)
+      3. Xe đẩy em bé Joie Litetrax 4 (4.990.000đ)
+      grounding_guard.blocked = false     ← đúng: 3 món này CÓ THẬT
+      answer_coherence.filtered = false   ← "xe máy điện" không thuộc ngành nào ⇒ không có gì để đối chiếu
+```
+
+**Cả hai lưới đều chống BỊA, không lưới nào chống LẠC ĐỀ.** Câu an toàn
+*"Chưa tìm thấy sản phẩm phù hợp trong danh mục hiện có"* (`main.py:1834`) chỉ chạy khi `items` **rỗng** — mà
+`items` gần như **không bao giờ rỗng**, vì `/v1/search` luôn trả về thứ gì đó theo điểm số.
+
+> ⛔ **Nếu trình cho khách: TRÁNH hỏi món shop không bán.** Thử hỏi thứ ngoài danh mục là phản xạ tự nhiên
+> nhất của khách khi ngồi trước một hệ AI — và hiện hệ sẽ kể 3 món vô can.
+> (Nợ đã ghi sổ kèm điều kiện đóng + test khoá hai chiều: `W-ASK-NOMATCH-STILL-LISTS`.)
+
 **Nói với khách:** *"Câu trả lời chỉ chứa hàng có thật trong kho, và hệ **tự khai** nó dùng khuôn máy hay mô
-hình ngôn ngữ. Trước bản vá 06/08, hỏi 'mì' mà trả bàn phím là chuyện thường."*
+hình ngôn ngữ. Đáng chú ý hơn: `items` trả về 3 món nhưng câu trả lời chỉ nêu 2 — món thứ ba bị chặn không
+cho lên lời. Trước bản vá 06/08, hỏi 'mì' mà trả bàn phím là chuyện thường."*
 
 ---
 ## [06] GET /internal/similar-products — hàng xóm gần nhất (API nội bộ)
@@ -596,6 +1121,40 @@ curl -s "localhost:16021/internal/similar-products?project_id=demoshop&product_i
            {"product_id": "bh-suatuoi-th",   "score": 0.3149}]}
 ```
 
+#### 📥 INPUT — **`GET`, và là API NỘI BỘ** (`main.py:917`)
+
+| Tham số | Bắt buộc | Kiểu | Mặc định | Ý nghĩa |
+|---|:---:|---|---|---|
+| `project_id` | **✔** | chuỗi | — | ⚠ **truyền trên URL**, không lấy từ header `X-Project-Id` như API công khai |
+| `product_id` | **✔** | chuỗi | — | tìm hàng xóm **của SKU này** |
+| `k` | | số nguyên | `5` | số hàng xóm. ⛔ **tên là `k`, KHÔNG phải `limit`** |
+
+**Xác thực khác hẳn API công khai:**
+
+| | API công khai (`/v1/*`) | API nội bộ (`/internal/*`) |
+|---|---|---|
+| Danh tính | `Authorization: Bearer <key khách>` | **`X-Internal-Token: <token hệ thống>`** |
+| Tenant | header `X-Project-Id` | **tham số URL `project_id`** |
+| Ai gọi | ứng dụng của khách hàng | **service khác trong hệ** (ở đây: `forecast`) |
+
+> ⛔ **`limit=` BỊ LỜ IM LẶNG.** FastAPI **bỏ qua mọi query param không khai báo** — nên `limit=10` vẫn trả
+> đúng 5 item mà **không báo gì**. Đo thật 13/08: `k=3 → 3 item` ✅ · `limit=3 → 5 item` ❌ · `k=10 → 10 item` ✅ ·
+> `limit=10 → 5 item` ❌. Bản cũ của tài liệu **chỉ đúng do trùng hợp** — mặc định của `k` cũng bằng 5.
+> (Nợ đã ghi: `W-INTERNAL-SIMILAR-LIMIT-IGNORED`.)
+
+#### 📤 RESPONSE — **rất gọn, chỉ 2 trường**
+
+| Trường | Ý nghĩa |
+|---|---|
+| `items[].product_id` | mã hàng xóm, **sắp giảm dần theo `score`** |
+| `items[].score` | ⭐ **độ gần vector, thang 0–1** (cosine). Càng gần 1 càng giống |
+
+⚠ **Không có `title`, không có giá.** Đây là API máy-gọi-máy: bên gọi (`forecast`) chỉ cần **mã và độ gần**.
+Không trả thừa = không lộ thừa.
+
+⚠ **Chưa có vector ⇒ trả `{"items": []}` + HTTP 200**, không phải 404. Im lặng rỗng chính là lý do phải có
+cổng kích `embed_backfill` ở cuối `[01]`.
+
 > ⛔ **Đã vá 13/08 — bản cũ dùng `limit=5`, mà tham số đó BỊ LỜ IM LẶNG.** Endpoint khai báo tham số tên
 > **`k`** (`main.py:922`), không phải `limit`. FastAPI **bỏ qua mọi query param không khai báo** — đúng
 > loại lỗi đã vá cho `/v1/decisions?product_id=` ngày 12/08. Đo thật 13/08:
@@ -620,12 +1179,54 @@ q miniai_forecast "SELECT product_id, count(*) AS ngay_lich_su FROM demand_daily
 ```
 **Đo thật:** cả 5 đều có **~130 ngày lịch sử** — tức có thật thứ để mượn. Đây chính là đầu vào của bước [07].
 
-### ④ LUỒNG
+### ④ LUỒNG — **API duy nhất trong cả buổi mà KHÁCH KHÔNG BAO GIỜ GỌI**
+
 ```
-forecast ──gọi chéo (X-Internal-Token)──► smartsearch /internal/similar-products
-                                                  └──► vector Vespa ──► 5 hàng xóm
-         ◄──── dùng làm nền cho cold_start_analog ở [07]
+        ┌──────────── DÂY CHUYỀN NUÔI VECTOR (đã chạy từ [01]) ────────────┐
+        │  products.title + description                                     │
+        │        └─ job embed_backfill (300 GIÂY) ─► mã hoá BGE-M3          │
+        │             └─► nạp vector 1024 chiều vào Vespa                   │
+        │             └─► đặt products.embedding_version = 1                │
+        └───────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+   ┌── SERVICE forecast (cổng 16023) ──────────────────────────────────────┐
+   │  [07] forecast:query thấy demand_daily = 0  ⇒  "SKU này chưa bán ngày │
+   │  nào, phải đi MƯỢN lịch sử của hàng tương tự"                          │
+   │                                                                        │
+   │  gọi chéo HTTP, mang X-Internal-Token (KHÔNG dùng key của khách)       │
+   └────────────────────────────────┬───────────────────────────────────────┘
+                                    ▼
+   ┌── SERVICE smartsearch (cổng 16021) ───────────────────────────────────┐
+   │  /internal/similar-products                                            │
+   │     lấy vector của SKU  ──► Vespa nearestNeighbor  ──► top-k gần nhất  │
+   │     (chỉ ĐỌC — không ghi bảng nào, không ghi query_log)                │
+   └────────────────────────────────┬───────────────────────────────────────┘
+                                    ▼
+   ┌── quay lại forecast ──────────────────────────────────────────────────┐
+   │  đọc demand_daily của 5 hàng xóm ──► lấy dáng mùa vụ, quy về cùng mức │
+   │  ──► trả p10/p50/p90 + analog_of = ĐÚNG 5 mã đó                       │
+   └───────────────────────────────────────────────────────────────────────┘
 ```
+
+**Bảng đọc/ghi:**
+
+| Nguồn | Vai trò | Ghi gì |
+|---|---|---|
+| Vespa (vector) | đọc | — |
+| `products.embedding_version` | điều kiện tiên quyết | — |
+| `demand_daily` của hàng xóm | đọc (ở `[07]`) | — |
+| **không bảng nào** | | ⭐ **API này KHÔNG GHI GÌ HẾT** |
+
+⭐ **Vì sao bước này đáng dừng lại giải thích:** nó là **mắt xích nối HAI service** — `forecast` không hề biết
+gì về vector hay Vespa, nó chỉ biết hỏi `smartsearch` một câu rất hẹp: *"cho tôi 5 mã giống mã này nhất"*.
+Đổi hẳn công nghệ tìm kiếm bên dưới cũng **không phải sửa một dòng nào** trong `forecast`.
+
+⚠ **Nếu khách soi danh sách 5 hàng xóm:** có `bh-nuocgiat-omo` (nước giặt) nằm cạnh mì gói. Đo thật: điểm 5
+món chỉ chênh **0.3305 → 0.3149**, tức vector **chưa tách được ngành** vì kho demo chỉ 136 SKU. Trả lời trung
+thực: *"Đúng, chỗ này chưa chuẩn. Nhưng điều đáng nói là **hệ liệt kê ra để anh chị bắt được** — một hệ giấu
+danh sách thì anh chị đã tin nhầm con số dự báo mà không biết vì sao."*
+
 **Nói với khách:** *"Đây là ranh giới nội bộ/công khai: hai service nói chuyện với nhau bằng token riêng,
 không dùng key của khách hàng."*
 
@@ -669,6 +1270,45 @@ data_window= None
 3 ngay dau = [('2026-08-13', 1.69, 3.08), ('2026-08-14', 1.54, 3.55), ('2026-08-15', 2.41, 4.34)]
 ```
 
+#### 📥 INPUT (`main.py:635-660` + `openapi/forecast.json`)
+
+| Trường | Bắt buộc | Ràng buộc | Mặc định | Ý nghĩa |
+|---|:---:|---|---|---|
+| `product_id` | **✔** | chuỗi, **độ dài ≥ 1** | — | SKU cần dự báo |
+| `horizon_days` | | số nguyên **1–56** | `14` | dự báo bao nhiêu ngày tới. ⚠ trần **56** — quá 8 tuần thì mô hình hết đáng tin |
+| `quantiles` | | mảng số thực 0–1 | — | xin thêm phân vị **ngoài** bộ p10/p50/p90 mặc định |
+| `granularity` | | `daily` | `daily` | độ mịn thời gian |
+
+#### 📤 RESPONSE — 12 trường, trong đó **4 trường là LỜI TỰ KHAI**
+
+| Trường | Kiểu | Ý nghĩa |
+|---|---|---|
+| `product_id` | chuỗi | soi lại SKU đã hỏi |
+| `daily[]` | mảng | **`{day, p10, p50, p90}`** mỗi ngày một dòng — ruột của câu trả lời |
+| `totals` | đối tượng | tổng cả kỳ theo phân vị |
+| `totals_method` | chuỗi | ⭐ tổng được tính **thế nào** — vì **phân vị KHÔNG cộng được** (xem `[14]`) |
+| **`model_used`** | chuỗi | ⭐⭐ **mô hình nào đã sinh số này** — `cold_start_analog` \| `seasonal_naive` \| `lgbm_global` \| … |
+| **`run_id`** | chuỗi | ⭐ mẻ nào. **Tiền tố `analog_` = đang mượn**; `r_<ngày>` = mẻ thật |
+| **`data_window`** | đối tượng \| `null` | ⭐ **khoảng ngày dữ liệu đã dùng**. `null` = **KHÔNG có ngày nào của chính SKU này** |
+| **`analog_of`** | mảng \| *(vắng)* | ⭐⭐ **danh sách SKU đang mượn** — chỉ xuất hiện khi `model_used = cold_start_analog` |
+| `calibration` | đối tượng | khoảng dự báo đã được hiệu chỉnh chưa |
+| `censored_adjusted_days` | số | số ngày đã bù vì **hết hàng** (bán 0 do không còn hàng, không phải do ế) |
+| `calendar_effects` | mảng | hệ số lịch đã nhân (Tết, lễ) |
+| `generated_at` · `consistency` | | thời điểm + tình trạng bắt kịp sổ cái |
+
+⭐⭐ **Bốn trường tự khai là toàn bộ thông điệp của bước này.** Chúng cho phép chủ shop trả lời được câu
+*"tôi có nên tin con số này không?"* mà **không cần hiểu gì về mô hình**:
+
+| Nhìn thấy | Nghĩa là |
+|---|---|
+| `run_id` bắt đầu `analog_` | 🟡 số **đi mượn** |
+| `model_used = cold_start_analog` | 🟡 nói thẳng tên cách mượn |
+| `data_window = null` | 🟡 **không có ngày dữ liệu nào của chính SKU** |
+| `analog_of = [5 mã]` | 🟡 **mượn của đúng 5 mã này — tự phán xem có hợp lý không** |
+
+⚠ **`analog_of` KHÔNG xuất hiện** khi SKU đã có lịch sử thật (đo trên `bh-mi-haohao`: response không có
+trường này). Trường **vắng mặt** cũng là thông tin.
+
 ### ③ ĐO SAU — số này KHÔNG được ghi vào kho (chỉ tính lúc hỏi)
 ```bash
 q miniai_forecast "SELECT count(*) AS van_la_0 FROM forecasts WHERE project_id='demoshop' AND product_id='$SKU';"
@@ -676,13 +1316,63 @@ q miniai_forecast "SELECT count(*) AS van_la_0 FROM forecasts WHERE project_id='
 **Đo thật:** vẫn `0`. **Rất quan trọng:** dự báo analog là **câu trả lời tạm lúc đọc**, hệ **không đóng dấu**
 nó vào sổ dự báo chính thức — vì nó không phải lịch sử của chính SKU này.
 
-### ④ LUỒNG
+### ④ LUỒNG — **tầng ĐỌC: không huấn luyện gì, nhưng có 2 ngã rẽ**
+
 ```
-:query ──không thấy demand_daily──► gọi similar-products ──► 5 hàng xóm
-       ──► lấy mẫu mùa vụ của hàng xóm, quy về cùng mức ──► trả p10/p50/p90
-       ──► run_id = analog_*  ·  model_used = cold_start_analog  ·  data_window = null
-       ──✗ KHÔNG ghi vào bảng forecasts
+POST :query (product_id, horizon_days)
+   │
+   ├─ TRA bảng forecasts theo (project_id, product_id, run_id mới nhất)
+   │
+   ├──────────── NGÃ A: CÓ dữ liệu đông lạnh ──────────────► xem [13]
+   │     forecasts đã được job forecast_run ghi sẵn từ trước
+   │     :query CHỈ đọc — KHÔNG tính lại gì
+   │           │
+   │           ├─► nhân hệ số lịch (calendar_events: Tết/lễ)
+   │           ├─► gộp totals theo totals_method
+   │           └─► model_used = seasonal_naive | lgbm_global | …
+   │               run_id = r_<ngày>   ·   data_window = có giá trị
+   │
+   └──────────── NGÃ B: KHÔNG có dòng nào (SKU mới) ────────► CHÍNH BƯỚC NÀY
+         │
+         ├─① gọi chéo smartsearch /internal/similar-products  (xem [06])
+         │     → 5 hàng xóm gần nhất theo vector
+         │
+         ├─② đọc demand_daily CỦA 5 HÀNG XÓM (không phải của SKU này)
+         │
+         ├─③ lấy DÁNG mùa vụ của họ, QUY VỀ CÙNG MỨC cho SKU mới
+         │     (giữ hình dạng lên-xuống theo thứ trong tuần, đổi độ lớn)
+         │
+         ├─④ đóng dấu tự khai:
+         │     run_id     = analog_<ngày>
+         │     model_used = cold_start_analog
+         │     data_window= null            ← KHÔNG bịa ra một khoảng ngày
+         │     analog_of  = [5 mã đó]       ← khai đích danh
+         │
+         └─⑤ ✗ KHÔNG GHI vào bảng forecasts        ⭐ điểm cốt lõi
 ```
+
+⭐⭐ **Vì sao ngã B KHÔNG được ghi vào `forecasts`?** Vì bảng đó là **sổ dự báo chính thức của từng SKU**, và
+con số này **không phải lịch sử của SKU này** — nó là số đi mượn, tính tại chỗ lúc đọc. Nếu đóng dấu vào sổ:
+
+- các API sau (`[14] scenarios:build`, `[15] decisions:run`, `[19] replenish-plan`) sẽ **đọc nhầm số mượn
+  thành số thật**, và **mất luôn** dấu vết `analog_of`;
+- lời tự khai chỉ tồn tại trong response, **không tồn tại trong bảng** ⇒ người đọc bảng sau này không có
+  cách nào biết dòng đó là số mượn.
+
+> **Nguyên tắc chung, đáng nói với khách:** *"Số đi mượn thì chỉ được sống trong câu trả lời, không được
+> vào sổ."* Bước `[07]` ③ đã chứng minh: gọi API xong, `forecasts` **vẫn bằng 0**.
+
+**Bảng đọc/ghi của bước này:**
+
+| Bảng / dịch vụ | Đọc | Ghi |
+|---|:---:|:---:|
+| `forecasts` | ✔ (ngã A) | ✗ **không bao giờ** |
+| `demand_daily` (của hàng xóm) | ✔ | ✗ |
+| `calendar_events` | ✔ (best-effort, lỗi ⇒ bỏ qua) | ✗ |
+| `smartsearch /internal/similar-products` | ✔ gọi chéo | ✗ |
+
+⚠ Toàn bộ nhánh lịch là **best-effort**: `calendar_events` hỏng thì trả `calendar_effects = []` chứ **không
+bao giờ** làm chết câu trả lời dự báo.
 **Câu nói cho khách (chậm rãi):** *"Ba chỗ hệ tự khai mình đang đoán: `run_id` bắt đầu bằng `analog_`,
 `model_used` ghi thẳng `cold_start_analog`, và `data_window` để **trống** vì SKU này chưa có ngày dữ liệu nào.
 Nó còn liệt kê đúng 5 mặt hàng nó dựa vào để anh chị tự phán xem có hợp lý không. Một hệ thống bịa số sẽ không
@@ -720,17 +1410,102 @@ curl -s -w "\nstatus: %{http_code}\n" localhost:16022/v1/decisions:price-preview
 status: 412
 ```
 
+#### 📥 INPUT — chỉ **2 trường** (`main.py:1066-1080`) — *dùng chung cho `[08]`, `[17]`, `[18]`*
+
+| Trường | Bắt buộc | Kiểu | Ý nghĩa |
+|---|:---:|---|---|
+| `product_id` | **✔** | chuỗi | SKU muốn thử giá |
+| `candidate_price` | **✔** | số > 0, **đơn vị đồng** | giá muốn thử — *"nếu tôi bán giá này thì sao?"* |
+
+⚠ **Không có `horizon`, không có `quantity`.** API luôn tính trên **cửa sổ 30 ngày** cố định — chính là ý nghĩa
+của mọi trường `*_30d` trong kết quả.
+
+#### 📤 RESPONSE — **hai hình dạng khác nhau tuỳ đủ hay thiếu dữ liệu**
+
+**Hình dạng ① — THIẾU dữ liệu ⇒ HTTP `412 FAILED_PRECONDITION`** *(chính là bước này)*
+
+| Trường | Ý nghĩa |
+|---|---|
+| `error.code` | luôn là `FAILED_PRECONDITION` |
+| `error.message` | ⭐ **GỌI TÊN đích danh cổng đang thiếu** — 1 trong 3 câu ở bảng dưới |
+
+**Hình dạng ② — ĐỦ dữ liệu ⇒ HTTP `200`** *(xem `[17]`)*
+
+| Trường | Kiểu | Ý nghĩa |
+|---|---|---|
+| `current` | đối tượng | `{price, est_units_30d, est_profit_30d}` — **hiện trạng** |
+| `candidate` | đối tượng | 3 trường y hệt, cho **giá đang thử** |
+| `delta_profit_30d` | số | ⭐ **lãi tháng thay đổi bao nhiêu ĐỒNG** — âm là giảm. Con số quyết định |
+| `elasticity_used` | đối tượng | `eps` · `method` · `n_points` · `r2` — **độ co giãn nào đã dùng và tin tới đâu** |
+| `guardrails` | mảng | `[{code, status}]` — chốt an toàn đã kiểm. `BELOW_COST: FAIL` = **cấm** |
+| `confidence` | số 0–1 | độ tin theo chất lượng bằng chứng |
+| `explanation` | chuỗi | ⭐ **công thức viết ra bằng chữ**: `Q(P)=Q0·(P/P0)^eps; profit=(P-c)·Q` |
+| `generated_at` | ISO-8601 | thời điểm |
+
+⭐ **`elasticity_used.method` là trường trung thực nhất của cả API:**
+
+| `method` | Nghĩa | Tin tới đâu |
+|---|---|---|
+| `ols_daily` | hồi quy trên **chính lịch sử SKU này** | ✅ cao — có `r2` kèm |
+| `pooled_prior` | ⚠ **MƯỢN độ co giãn trung bình của shop** | 🟡 vừa — `r2` để **trống**, `confidence` bị hạ |
+
 ### ③ ĐO SAU — không có gì được ghi (API chỉ đọc)
 ```bash
 q miniai_decision "SELECT count(*) AS quyet_dinh_moi FROM decisions WHERE project_id='demoshop' AND subject_id='$SKU';"
 ```
 **Đo thật:** `0`
 
-### ④ LUỒNG
+### ④ LUỒNG — **3 cổng NỐI TIẾP, dừng ở cổng đầu tiên thiếu**
+
 ```
-:price-preview ──► kiểm 3 cổng dữ liệu: doanh số 30d → giá vốn → giá hiện tại
-               ──► thiếu cổng nào ⇒ 412 + GỌI TÊN đúng cổng đó
+POST :price-preview (product_id, candidate_price)
+   │
+   ├─🚪 CỔNG 1 — sales_daily 30 ngày qua       (main.py:1093)
+   │     đếm = 0 ⇒ 412 "no sales in last 30d"          ◄── DỪNG TẠI ĐÂY ở bước [08]
+   │     lý do: không có nhịp bán thì KHÔNG có Q0 để đặt vào công thức
+   │
+   ├─🚪 CỔNG 2 — cost_state.ewma_cost           (main.py:1098)
+   │     rỗng ⇒ 412 (thiếu giá vốn)
+   │     lý do: không biết vốn thì không tính được LÃI, và không chặn được bán dưới vốn
+   │
+   ├─🚪 CỔNG 3 — price_state.current_price      (main.py:1111)
+   │     rỗng ⇒ 412 (thiếu giá hiện tại)
+   │     lý do: không có P0 thì tỉ số P/P0 vô nghĩa
+   │
+   ├─ QUA CẢ 3 ─► lấy độ co giãn eps
+   │                ├─ có đủ điểm giá  ─► ols_daily   (hồi quy price_history × sales_daily)
+   │                └─ thiếu điểm giá  ─► pooled_prior (MƯỢN trung bình shop, hạ confidence)
+   │
+   ├─► Q_candidate = Q0 × (P/P0)^eps          ← đường cầu luỹ thừa
+   ├─► profit      = (P − vốn) × Q            ← cho cả hiện tại và giá thử
+   ├─► guardrails: BELOW_COST — P < vốn ? FAIL : PASS
+   │
+   └─► 200 + bảng tính đầy đủ                  ✗ KHÔNG GHI BẢNG NÀO
 ```
+
+**Bảng đọc/ghi — API này là tầng ĐỌC THUẦN:**
+
+| Bảng | Đọc | Ghi | Ai nuôi bảng đó |
+|---|:---:|:---:|---|
+| `sales_daily` | ✔ | ✗ | job `state_rollup` (300s) từ `raw_events` |
+| `cost_state` | ✔ | ✗ | job `state_rollup` từ sự kiện `cost.recorded` |
+| `price_state` | ✔ | ✗ | job `state_rollup` từ sự kiện `price.changed` |
+| `price_history` + `elasticity` | ✔ | ✗ | job `state_rollup` / ước lượng nền |
+| `decisions` | ✗ | ✗ | ⭐ **thử giá KHÔNG đẻ ra lời khuyên nào** |
+
+⭐⭐ **`412` là mã trạng thái được chọn có chủ ý.** Nó **không phải** `400` (người gọi gõ sai) và **không
+phải** `500` (hệ hỏng). `412 Precondition Failed` nghĩa là: *"Yêu cầu của anh hợp lệ, hệ tôi cũng khoẻ —
+nhưng **điều kiện tiên quyết chưa đủ**."* Và `message` **gọi tên đúng thứ đang thiếu** để người dùng biết
+phải đi làm gì tiếp (chính là `[09]`/`[10]`).
+
+⭐ **Đối chiếu với `[07]` — hai service phản ứng KHÁC NHAU trước cùng một cảnh thiếu dữ liệu:**
+
+| | `[07]` forecast | `[08]` decision |
+|---|---|---|
+| Thiếu dữ liệu | **vẫn trả lời**, khai đang mượn | **từ chối thẳng**, `412` |
+| Vì sao được phép khác | dự báo sai thì **điều chỉnh được** ở mẻ sau | khuyên giá sai thì **mất tiền thật ngay** |
+
+*"Máy biết chỗ nào được phép đoán và chỗ nào không."*
 **Nói với khách:** *"`412` không phải lỗi hệ thống — là **lỗi dẫn đường**. Nó nói đúng đang thiếu doanh số
 30 ngày. Anh chị vừa tự kiểm bằng SQL: đúng là 0 dòng. Máy không nói dối."*
 
@@ -748,12 +1523,40 @@ snap $SKU
 **Đo thật:** `raw_events(forecast)=13604 · demand_daily=0 · sales_daily=0`
 
 ### ② GỌI API
+
+#### 📥 INPUT — thân là `{"events": [ ... ]}`, mỗi phần tử là **một phong bì sự kiện**
+
+| Trường | Bắt buộc | Kiểu | Ý nghĩa |
+|---|:---:|---|---|
+| `event_id` | **✔** | chuỗi | ⭐⭐ **KHOÁ CHỐNG TRÙNG do NGƯỜI GỬI đặt** — gửi lại 100 lần vẫn tính 1 |
+| `event_type` | **✔** | chuỗi | loại sự kiện, quyết định service nào tiêu thụ |
+| `event_time` | **✔** | ISO-8601 UTC | ⭐ **thời điểm việc XẢY RA** — `:backfill` cho phép ở **quá khứ** |
+| `schema_version` | **✔** | chuỗi (`"1.0"`) | phiên bản khuôn payload |
+| `user_pseudo_id` | | chuỗi | mã người mua ẩn danh |
+| `payload` | **✔** | đối tượng | **ruột** — hình dạng tuỳ `event_type` |
+
+**Ruột `payload` của `purchase.completed`:**
+
 | Trường | Ý nghĩa |
 |---|---|
-| `event_id` | **khoá chống trùng** — gửi lại 2 lần chỉ tính 1 |
-| `event_type` | `purchase.completed` |
-| `event_time` | ISO-8601 UTC, được phép ở quá khứ |
-| `payload.items[]` | `{product_id, qty, unit_price}` — **đúng tên `qty`/`unit_price`** |
+| `order_ref` | mã đơn phía khách |
+| `items[]` | `{product_id, qty, unit_price}` — ⛔ **đúng tên `qty` và `unit_price`**, không phải `quantity`/`price` |
+
+⭐ **Một sự kiện = một GIỎ nhiều mặt hàng**, không phải một dòng một SKU. Đây là lý do `items` là mảng.
+
+> ⭐ **`:backfill` khác `:ingest` ở đúng một điểm:** `:backfill` **chấp nhận mốc thời gian quá khứ** (dùng khi
+> onboard khách mới, đổ lịch sử vào); `:ingest` là đường sự kiện phát sinh hằng ngày. **Cùng một hợp đồng
+> thân yêu cầu, cùng một cơ chế chống trùng.**
+
+#### 📤 RESPONSE — **5 con số, đọc được là biết chuyện gì đã xảy ra**
+
+| Trường | Ý nghĩa | Đọc thế nào |
+|---|---|---|
+| `accepted` | số sự kiện **mới**, đã ghi vào `raw_events` | công việc thật sự đã làm |
+| `deduped` | số sự kiện **service này đã có rồi** (trùng `event_id`) | ✅ **chống trùng đang chạy** — không phải lỗi |
+| `skipped` | số sự kiện **service này không quan tâm** | vd `forecast` bỏ qua `price.changed` |
+| `errors[]` | danh sách lỗi từng sự kiện | rỗng = sạch |
+| `conflicted` | số sự kiện **SỔ CÁI CHUNG đã có** (kho riêng thì chưa) | ⚠ khác 0 = sổ cái nhớ dai hơn kho service — **vô hại** |
 
 ```bash
 .venv/bin/python - <<'PY'
@@ -786,11 +1589,52 @@ echo "demand_daily = $(q miniai_forecast "SELECT count(*) FROM demand_daily WHER
 **Đo thật:** `raw_events = 21` ✅ · `demand_daily = 0` ⛔
 
 ### ④ LUỒNG — **đây là chỗ giải thích kiến trúc hay nhất**
+
 ```
-:backfill ──ghi NGAY──► raw_events (sổ cái, chỉ ghi thêm, không sửa/xoá)
-                            │
-                            └──job rollup (mỗi 1 giờ)──► demand_daily (chuỗi theo ngày)
+POST :backfill  (21 phong bì)
+   │
+   ├─🔒 CHỐNG TRÙNG hai tầng, chạy TRƯỚC khi ghi
+   │     tầng 1: event_id đã có trong raw_events của service NÀY?  ⇒ deduped++
+   │     tầng 2: event_id đã có trong SỔ CÁI CHUNG event_ledger?   ⇒ conflicted++
+   │
+   ├─ ✍ GHI NGAY, TRONG YÊU CẦU  ────────────────────────────────────────┐
+   │     ① raw_events (kho riêng của forecast)   📕 SỔ CÁI                │
+   │     ② event_ledger (kho chung miniai_ledger) 📕 SỔ CÁI CHUNG         │
+   │        └─ đây là lý do một sự kiện gửi vào MỘT service               │
+   │           tự chảy sang service KHÁC cần nó (xem [10])                │
+   └──────────────────────────────────────────────────────────────────────┘
+   │
+   └─► trả {accepted, deduped, skipped, errors, conflicted}   ⚡ NHANH — chỉ ghi thêm
+
+                    ⏳ ĐẾN ĐÂY demand_daily VẪN = 0 ⭐
+
+   ┌──────────────────────────────────────────────────────────────────────┐
+   │  job rollup — nhịp 3.600 GIÂY (1 giờ)   jobs/rollup.py:360           │
+   │     đọc raw_events → gom theo (product_id, NGÀY)                     │
+   │     → cộng qty, khử hết-hàng, khử khuyến mãi                         │
+   │     → ghi demand_daily     🖼 HÌNH CHIẾU                             │
+   └──────────────────────────────────────────────────────────────────────┘
+                                   │
+                                   ▼  ⇒ [11] forecast:run mới có nguyên liệu
 ```
+
+⭐⭐ **"GHI NHANH, TÍNH CHẬM" — vì sao `raw_events = 21` mà `demand_daily = 0`?**
+
+Đây **không phải lỗi**, mà là cột sống kiến trúc. Cửa vào chỉ làm **đúng một việc rẻ nhất**: ghi thêm một
+dòng. Mọi phép tính nặng (gom theo ngày, khử hết hàng, khử khuyến mãi, huấn luyện) đẩy hết sang job nền.
+Hệ quả: **giờ cao điểm không nghẽn cửa vào** — 10.000 đơn/phút vẫn chỉ là 10.000 lần ghi thêm.
+
+| | 📕 SỔ CÁI | 🖼 HÌNH CHIẾU |
+|---|---|---|
+| Ví dụ | `raw_events` · `event_ledger` | `demand_daily` · `sales_daily` · `forecasts` |
+| Ghi lúc nào | **ngay**, trong yêu cầu | theo **nhịp job** |
+| Sửa được không | ⛔ **KHÔNG BAO GIỜ** — chỉ ghi thêm | ✅ xoá sạch vẫn **dựng lại được** từ sổ cái |
+| Hỏng thì sao | mất là mất thật | chạy lại job là có lại |
+
+⭐ **`event_id` do NGƯỜI GỬI đặt — đó là chi tiết đắt.** Hệ không tự sinh mã, vì nếu tự sinh thì gửi lại lần
+hai sẽ thành một sự kiện mới ⇒ **doanh số nhân đôi**. Để người gửi đặt mã (theo `đơn hàng + SKU + ngày`)
+thì mạng chập chờn, gửi lại bao nhiêu lần cũng an toàn. Bước `⑤` bên dưới chứng minh: gửi lại lần hai ra
+`accepted = 0 | deduped = 21`, `raw_events` **vẫn đúng 21**.
 **Nói với khách:** *"Sự kiện vào sổ cái ngay lập tức — 21 dòng, anh chị vừa đếm. Nhưng chuỗi bán theo ngày
 vẫn là 0, vì việc cộng sổ do một job nền làm theo nhịp. **Ghi nhanh, tính chậm** — đó là lý do cửa vào chịu
 được giờ cao điểm."*
@@ -827,11 +1671,22 @@ q miniai_decision "SELECT 'von='||coalesce(round(max(ewma_cost))::text,'—') FR
 **Đo thật:** `ton=—` · `von=—`
 
 ### ② GỌI API
-| Loại | Payload | Dùng để |
-|---|---|---|
-| `cost.recorded` | `{product_id, unit_cost, qty}` | giá vốn bình quân (EWMA) — nền của mọi chốt lãi/lỗ |
-| `price.changed` | `{product_id, new_price}` | mốc giá + lịch sử để ước lượng độ co giãn |
-| `stock.level` | `{product_id, on_hand_qty}` | tồn kho — nền của kế hoạch nhập hàng |
+
+#### 📥 INPUT — **cùng hợp đồng phong bì với `[09]`** (xem bảng đầy đủ ở `[09]`), chỉ khác `event_type` + `payload`
+
+| `event_type` | `payload` | Đổ vào bảng | Mở khoá bước nào |
+|---|---|---|---|
+| `cost.recorded` | `{product_id, unit_cost, qty}` | `cost_ledger` → `cost_state` | `[17]` tính lãi · `[18]` chặn bán dưới vốn |
+| `price.changed` | `{product_id, new_price}` | `price_history` → `price_state` | `[17]` mốc P0 để so · ước lượng độ co giãn |
+| `stock.level` | `{product_id, on_hand_qty}` | `stock_state` | `[19]` kế hoạch nhập hàng |
+
+⚠ **`unit_cost` là giá NHẬP VÀO, `new_price` là giá BÁN RA.** Gửi nhầm chỗ thì mọi phép tính lãi đảo dấu mà
+**không có gì báo** — hệ không có cách nào biết con số nào là vốn nếu người gửi dán sai loại sự kiện.
+
+#### 📤 RESPONSE — **y hệt `[09]`**: `accepted` · `deduped` · `skipped` · `errors[]` · `conflicted`
+
+⭐ Ở bước này bộ số đọc ra một câu chuyện khác: **`accepted: 3, deduped: 21`**. Xem giải thích ngay dưới —
+đó là **điểm khoe**, không phải lỗi.
 
 ```bash
 EVT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -880,11 +1735,62 @@ echo "sau job : ton=$(q miniai_decision "SELECT coalesce(max(on_hand_qty)::text,
 ```
 **Đo thật:** `ngay sau: ton=— von=—` → `sau job: ton=40 von=98000`
 
-### ④ LUỒNG
+### ④ LUỒNG — **sự kiện TỰ CHẢY giữa các service, và 3 bảng trạng thái ra đời**
+
 ```
-:backfill ──► raw_events (NGAY)
-                 └──job state_rollup (mỗi 300s)──► stock_state · cost_state · price_state
+POST :backfill → service DECISION (cổng 16022)
+   │
+   ├─ ✍ raw_events (kho decision) + event_ledger (sổ cái chung)     📕 NGAY
+   │
+   │      ⭐ ĐƯỜNG NGƯỢC LẠI — vì sao 21 đơn hàng ở [09] đã có sẵn ở đây:
+   │      ┌──────────────────────────────────────────────────────────────┐
+   │      │ [09] gửi purchase.completed vào FORECAST                     │
+   │      │   └─► ghi event_ledger (SỔ CÁI CHUNG, libs/common/ledger.py) │
+   │      │        └─► projector đẩy sang MỌI service tiêu thụ loại này  │
+   │      │             └─► decision cũng ăn purchase.completed          │
+   │      │                  ⇒ 21 đơn ĐÃ nằm sẵn trong kho decision      │
+   │      │                  ⇒ lần gửi này chúng ra deduped, KHÔNG phải  │
+   │      │                     accepted  →  accepted: 3, deduped: 21    │
+   │      └──────────────────────────────────────────────────────────────┘
+   │
+   └─► trả 5 con số
+
+                ⏳ ĐẾN ĐÂY  ton = —  ·  von = —   (bảng trạng thái CHƯA có gì)
+
+   ┌───────────────────────────────────────────────────────────────────────┐
+   │  job state_rollup — nhịp 300 GIÂY   jobs/state_rollup.py:354          │
+   │     đọc raw_events → dựng 3 bảng ẢNH CHỤP HIỆN TẠI:                   │
+   │        cost.recorded ─► cost_ledger  ─► cost_state.ewma_cost          │
+   │                          (bình quân TRƯỢT có trọng số — lô nhập mới    │
+   │                           ảnh hưởng nhiều hơn lô cũ)                   │
+   │        price.changed ─► price_history ─► price_state.current_price     │
+   │                          (giữ CẢ LỊCH SỬ, vì đo độ co giãn cần biến động)│
+   │        stock.level   ─► stock_state.on_hand_qty                       │
+   │     ⚠ CHỈ nhận sự kiện có event_time ≤ HIỆN TẠI                       │
+   └───────────────────────────────────────────────────────────────────────┘
+         │                    │                    │
+         ▼                    ▼                    ▼
+   [17][18] lãi/lỗ      [17] mốc so giá      [19] nhập hàng
 ```
+
+**Ba bảng trạng thái — tên khác nhau vì bản chất khác nhau:**
+
+| Bảng | Giữ gì | Vì sao phải như vậy |
+|---|---|---|
+| `cost_state.ewma_cost` | **một** con số vốn bình quân trượt | mỗi lô nhập một giá khác nhau; cần một con số đại diện, ưu tiên lô mới |
+| `price_state` + `price_history` | giá hiện tại **và cả lịch sử** | ⭐ đo độ co giãn **bắt buộc phải có biến động giá** — chỉ giữ giá hiện tại thì `eps` không tính được |
+| `stock_state.on_hand_qty` | tồn kho hiện tại | ảnh chụp, không cần lịch sử |
+
+> ⛔ **`stock.level` PHẢI dùng thời điểm HIỆN TẠI, không được dùng ngày tương lai.** `state_rollup` chỉ nhận
+> sự kiện đã xảy ra. Đo thật 12/08: bản trước ghi `event_time: "2026-08-13"` (ngày mai) ⇒ job **lặng lẽ bỏ
+> qua** ⇒ `stock_state` mãi rỗng ⇒ `[19]` không có tồn kho để tính. **Không báo lỗi gì cả** — đúng loại lỗi
+> tệ nhất: im lặng và đúng-về-mặt-kỹ-thuật.
+
+⭐ **Điểm khoe của bước này:** *"Anh chị vừa thấy một sự kiện gửi vào **một** service tự chảy sang service
+khác cần nó — và **không bị đếm hai lần**. Đó là sổ cái chung cộng với khoá chống trùng do người gửi đặt."*
+
+⚠ Nếu projector **chưa kịp** chạy thì con số sẽ là `accepted: 24, deduped: 0`. **Cả hai đều đúng** — đừng đọc
+thuộc số, đọc từ màn hình.
 **Nói với khách:** *"Đây là **tách sổ cái khỏi hình chiếu**. Sổ cái là sự thật, ghi ngay và không bao giờ sửa.
 Các bảng trạng thái chỉ là ảnh chụp được dựng lại từ sổ — hỏng thì dựng lại từ đầu được."*
 
@@ -928,6 +1834,27 @@ curl -s -w "\nstatus: %{http_code}\n" -X POST localhost:16023/v1/forecast:run -H
 ```
 **OUTPUT thật:** `202` + `{"status":"queued","run_id":"r_<NGÀY UTC>","job_id":"fr-demoshop-r_<NGÀY UTC>"}`
 
+#### 📥 INPUT — **thân RỖNG `{}`**
+
+Không có tham số nào. Lệnh này nghĩa là *"tính lại dự báo cho **toàn bộ** hàng trong shop"* — phạm vi lấy từ
+header `X-Project-Id`, không chọn được từng SKU. Vẫn phải gửi `-d '{}'` cho hợp lệ JSON.
+
+#### 📤 RESPONSE — HTTP **`202 Accepted`**, 3 trường
+
+| Trường | Ý nghĩa |
+|---|---|
+| `status` | `queued` — ⭐ **"đã nhận việc", KHÔNG phải "đã làm xong"** |
+| `run_id` | `r_<ngày UTC>` — **tên MẺ dự báo**; mọi dòng `forecasts` sinh ra mang mã này |
+| `job_id` | `fr-<tenant>-<run_id>` — **mã CÔNG VIỆC** để tra trạng thái ở `[12]` |
+
+⭐⭐ **`202` khác `200` ở đúng một chỗ, và đó là cả kiến trúc:** `200` nghĩa là *"xong rồi, đây là kết quả"*;
+`202` nghĩa là *"tôi đã nhận, kết quả sẽ có sau, đây là mã để anh theo dõi"*. Huấn luyện mất vài chục giây —
+nếu API ngồi chờ thì cửa vào **nghẽn** lúc đông khách.
+
+⭐ **Bất biến: MỘT tenant, MỘT ngày, MỘT mẻ.** `run_id` sinh từ **ngày**, nên gọi 10 lần trong ngày vẫn ra
+**cùng `job_id`** — không nhân đôi công. ⚠ `date.today()` chạy **trong container theo giờ UTC**: demo lúc
+04:xx sáng giờ VN thì UTC vẫn là **hôm trước**, nên nhận `r_2026-08-12` là **đúng**, không phải lỗi.
+
 > 🆕 **Đã vá 13/08 — `run_id` theo NGÀY UTC, không phải ngày trên máy.** `main.py:1118` dùng
 > `"r_" + date.today().isoformat()` trong container (múi UTC). Demo lúc **04:xx sáng giờ VN** thì UTC vẫn
 > là **hôm trước** ⇒ đo thật nhận `r_2026-08-12` chứ không phải `13`. Lệnh `[12]` dùng `date -u +%F` nên
@@ -949,12 +1876,55 @@ q miniai_forecast "SELECT job_id, status, attempt FROM job_run WHERE tenant_id='
 > Vẫn nói được: *"API trả lời xong từ lâu, nhưng **việc thật vẫn đang chạy ở nền** — đó là lý do hệ chịu
 > được lúc đông khách."*
 
-### ④ LUỒNG
+### ④ LUỒNG — **API và WORKER là hai tiến trình khác nhau, nối nhau bằng MỘT BẢNG**
+
 ```
-:run ──► ghi 1 dòng job_run (status=queued) ──► trả 202 NGAY
-                    └──forecast-worker nhận việc──► queued → running → done
-                                                        └──► ghi bảng forecasts
+   ┌── TIẾN TRÌNH API (container miniai-forecast) ─────────────────────┐
+   │  POST :run                                                        │
+   │    └─ ✍ ghi 1 dòng job_run:                                       │
+   │         job_id = fr-demoshop-r_<ngày>   status = queued           │
+   │         ON CONFLICT (job_id) DO UPDATE SET status='queued'        │
+   │            WHERE status IN ('done','dead')   ⭐ xem ghi chú dưới   │
+   │    └─► trả 202 NGAY (mili-giây)  —  API HẾT VIỆC TẠI ĐÂY          │
+   └───────────────────────────────────────────────────────────────────┘
+                              │
+                    bảng job_run = HÀNG ĐỢI VIỆC
+                    (không dùng Redis/Kafka — hàng đợi nằm ngay trong Postgres)
+                              │
+   ┌── TIẾN TRÌNH WORKER (container miniai-forecast-worker) ───────────┐
+   │  vòng lặp: nhặt dòng status='queued', đặt thành 'running'         │
+   │     ① đọc demand_daily (do job rollup dựng ở [09])                │
+   │     ② backtest: thử vài mô hình trên lịch sử, CHỌN cái sai ít nhất│
+   │     ③ chạy mô hình đã chọn → p10/p50/p90 cho 28 ngày tới          │
+   │     ④ ép bất biến 0 ≤ p10 ≤ p50 ≤ p90  (W-ETS-NEGATIVE-FORECAST)  │
+   │     ⑤ ✍ GHI bảng forecasts — 28 dòng/SKU, mang run_id của mẻ      │
+   │     ⑥ đặt job_run.status = 'done'  (hoặc 'failed' + error_code)   │
+   │  lỗi ⇒ attempt++ , thử lại; quá số lần ⇒ status='dead'            │
+   └───────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼  ⇒ [12] theo dõi · [13] đọc kết quả
 ```
+
+**Bảng đọc/ghi:**
+
+| Bảng | API `:run` | Worker |
+|---|:---:|:---:|
+| `job_run` | ✍ **ghi 1 dòng** (`queued`) | ✍ cập nhật `running` → `done`/`failed`/`dead` |
+| `demand_daily` | — | 📖 đọc |
+| `forecasts` | — | ✍ **ghi 28 dòng/SKU** |
+
+⭐ **Job đã `done` từ trước KHÔNG chặn lệnh này.** `forecast_run.py:1104-1111` có
+`ON CONFLICT (job_id) DO UPDATE SET status='queued' ... WHERE job_run.status IN ('done','dead')` — nghĩa là
+mẻ đã chạy xong thì **được xếp hàng lại**, vì dữ liệu có thể đã đổi từ lúc đó. Nhưng nếu đang `queued`/`running`
+thì **không đụng vào** — đó là cách chặn nhân đôi công.
+
+⭐ **Vì sao hàng đợi nằm trong Postgres chứ không phải Redis/Kafka?** Vì dòng `job_run` được ghi **trong cùng
+một giao dịch** với mọi thứ khác của yêu cầu ⇒ **không bao giờ có cảnh "đã nhận tiền mà quên xếp việc"**.
+Đây là mẫu hình `outbox` giống `[01]`, chỉ khác là hàng đợi này **giữ lại lịch sử** (`attempt`, `error_code`)
+thay vì xoá dòng sau khi xong — nên `[12]` mới tra ngược được.
+
+> ⚠ **Gõ nhanh nếu muốn bắt cảnh `queued`.** Worker nhặt việc trong vài giây; chậm là đã thành `running`.
+> Cả hai đều đúng, chỉ là `queued` mới cho khách **nhìn thấy việc nằm trong hàng đợi**.
 **Nói với khách:** *"`202` = **đã nhận việc**, không phải đã làm xong. Huấn luyện mất vài chục giây nên hệ trả
 ngay mã việc. Gọi lại khi việc đang chạy sẽ trả **cùng một mã** — không nhân đôi công."*
 
@@ -974,6 +1944,40 @@ import json,sys; s=(json.load(sys.stdin).get('job') or {}).get('status'); print(
 ```
 **OUTPUT thật:** `queued → running → done` (~30-60 giây)
 
+#### 📥 INPUT — **`GET`, 2 tham số URL, cả hai TUỲ CHỌN**
+
+| Tham số | Bắt buộc | Kiểu | Ý nghĩa |
+|---|:---:|---|---|
+| `job_id` | | chuỗi | có ⇒ response **thêm khối `job`** (trạng thái công việc `[11]`) |
+| `ledger_position` | | số nguyên | có ⇒ response **thêm `reached`**: hình chiếu đã vượt mốc này chưa |
+
+⭐ **Không truyền gì cũng gọi được** — khi đó chỉ trả tình trạng bắt kịp sổ cái của service.
+
+#### 📤 RESPONSE — API này trả lời **HAI câu hỏi khác nhau**
+
+| Trường | Luôn có | Ý nghĩa |
+|---|:---:|---|
+| `consumer` | ✔ | service đang trả lời (`forecast` / `search` / `decision`) |
+| `ledger_head` | ✔ | 📕 **sổ cái chung đã ghi tới vị trí nào** |
+| `projection_watermark` | ✔ | 🖼 **hình chiếu của service này tiêu hoá tới đâu** |
+| `is_caught_up` | ✔ | ⭐ `watermark == head` ⇒ **đang nhìn số mới nhất** |
+| `data_as_of` | ✔ | thời điểm của dữ liệu đang phục vụ |
+| `job` | khi có `job_id` | `{status, attempt, error_code}` — `queued`/`running`/`done`/`failed`/`dead` |
+| `reached` | khi có `ledger_position` | hình chiếu đã vượt mốc đó chưa |
+
+⭐⭐ **Hai câu hỏi rất dễ nhầm thành một:**
+
+| Câu hỏi | Trường trả lời |
+|---|---|
+| *"Việc tôi đặt chạy xong chưa?"* | `job.status` |
+| *"Số tôi sắp đọc đã mới nhất chưa?"* | `is_caught_up` |
+
+Một việc có thể `done` mà hình chiếu **vẫn chưa** bắt kịp (job khác đang chạy), và ngược lại.
+
+⚠ **Sổ cái không truy cập được ⇒ `503 UNAVAILABLE` CÓ TÊN.** Khác mọi API đọc khác (chúng chỉ **bỏ trường
+`consistency`** và vẫn trả lời) — vì **chính API này LÀ cái đồng hồ đo**. Đồng hồ hỏng thì phải nói hỏng,
+không được chỉ vào mặt số trống.
+
 ### ③ ĐO SAU — đối chiếu API với kho
 ```bash
 q miniai_forecast "SELECT status, attempt, coalesce(error_code,'-') FROM job_run WHERE job_id='$JOB';"
@@ -981,11 +1985,45 @@ q miniai_forecast "SELECT count(*) AS dong_du_bao FROM forecasts WHERE project_i
 ```
 **Đo thật:** `done | 0 | -` · **dòng dự báo: 0 → 28** (đúng 28 ngày tầm nhìn)
 
-### ④ LUỒNG
+### ④ LUỒNG — **API này KHÔNG làm gì, nó chỉ SOI hai cái đồng hồ**
+
 ```
-job_run.status ◄── worker cập nhật ──► forecasts (28 dòng/SKU)
-projections/status đọc CẢ HAI: trạng thái việc + đã bắt kịp sổ cái chưa
+   ┌── ĐỒNG HỒ 1: HÀNG ĐỢI VIỆC ────────────────────────────────────┐
+   │   bảng job_run                                                  │
+   │      API [11] ─ghi─► queued                                     │
+   │      worker  ─ghi─► running ─► done | failed(+error_code) | dead│
+   └──────────────────────────┬──────────────────────────────────────┘
+                              │  đọc theo job_id
+                              ▼
+                  GET /v1/projections/status  ──► trả về, KHÔNG GHI GÌ
+                              ▲
+                              │  đọc watermark vs head
+   ┌──────────────────────────┴──────────────────────────────────────┐
+   │  ĐỒNG HỒ 2: ĐỘ TRỄ HÌNH CHIẾU                                   │
+   │     event_ledger.max(event_pk) ........ ledger_head   📕         │
+   │     con trỏ tiêu thụ của service ...... projection_watermark 🖼  │
+   │     bằng nhau ⇒ is_caught_up = true                             │
+   └─────────────────────────────────────────────────────────────────┘
 ```
+
+**Bảng đọc/ghi:**
+
+| Bảng | Đọc | Ghi |
+|---|:---:|:---:|
+| `job_run` | ✔ | ✗ |
+| `event_ledger` (sổ cái chung) | ✔ | ✗ |
+| bất kỳ bảng nào khác | ✗ | ✗ |
+
+⭐⭐ **Vì sao bước này BẮT BUỘC, không được bỏ qua:** `[13]` đọc bảng `forecasts`. Nếu gọi `[13]` khi worker
+**chưa ghi xong**, nó sẽ đọc phải **số của mẻ CŨ** — và **không có gì báo sai cả**, vì bảng vẫn có dữ liệu,
+API vẫn trả `200`. Đây đúng loại lỗi tệ nhất: **im lặng và trông như đúng**. Vòng lặp `until … done` ở bước ②
+chính là cái chặn nó.
+
+⭐ **Lỗi không bị nuốt.** Job hỏng ⇒ `status = failed` **kèm `error_code`**, và `attempt` đếm số lần đã thử.
+Quá số lần ⇒ `dead`. Ba trạng thái đó **nhìn thấy được từ ngoài**, không phải đi đào log.
+
+**Nói với khách:** *"`202` lúc nãy chỉ là lời hứa. Đây là chỗ kiểm lời hứa đó. Và nếu việc hỏng thì nó hiện
+ra mã lỗi, chứ không im lặng để anh chị đọc phải số cũ mà tưởng là số mới."*
 **Nói với khách:** *"`is_caught_up: true` = hình chiếu đã bắt kịp sổ cái. Nếu `failed` thì có `error_code`
 kèm — **lỗi nhìn thấy được, không nuốt**."*
 
@@ -1014,13 +2052,45 @@ q miniai_forecast "SELECT horizon_day, round(p10,2), round(p50,2), round(p90,2) 
 ```
 **Điểm chốt:** hai bảng số **trùng khít**. API tầng đọc **không tính lại gì** — nó đọc kết quả đã đông lạnh.
 
-### ④ LUỒNG + cách đọc 3 con số
+### ④ LUỒNG — **NGÃ A của cùng API `[07]`: đọc số đã đông lạnh**
+
+📥 INPUT và 📤 RESPONSE: **y hệt `[07]`** (xem bảng đầy đủ ở đó). Lệnh gõ **không đổi một ký tự**.
+Chỉ có **dữ liệu bên dưới** đã đổi — và vì thế 4 trường tự khai đổi theo.
+
 ```
-forecasts (đã đông lạnh theo run_id) ──:query──► nhân hệ số lịch (Tết/lễ) ──► trả về
+POST :query (y hệt [07])
+   │
+   ├─ TRA forecasts theo (project_id, product_id, run_id mới nhất)
+   │     ✅ CÓ 28 dòng — do worker [11] ghi, đã qua cổng chờ [12]
+   │
+   ├─ ✗ KHÔNG gọi similar-products     ← khác [07]
+   ├─ ✗ KHÔNG tính lại mô hình         ← chỉ ĐỌC kết quả đông lạnh
+   │
+   ├─► nhân hệ số lịch (calendar_events: Tết/lễ) — best-effort
+   ├─► gộp totals theo totals_method   (phân vị KHÔNG cộng được — xem [14])
+   │
+   └─► run_id = r_<ngày>  ·  model_used = seasonal_naive  ·  data_window = CÓ GIÁ TRỊ
+       analog_of = KHÔNG XUẤT HIỆN     ⭐ trường vắng mặt cũng là thông tin
 ```
-- **`p50`** = kịch bản giữa → **lập kế hoạch**
-- **`p90`** = kịch bản cao → **nhập hàng** (tránh cháy hàng)
-- **`p10`** = kịch bản thấp → **giữ dòng tiền**
+
+**Bốn trường tự khai — đặt cạnh `[07]` là thấy ngay:**
+
+| Trường | `[07]` chưa có dữ liệu | `[13]` sau 21 ngày |
+|---|---|---|
+| `run_id` | `analog_2026-08-12` 🟡 | `r_2026-08-13` ✅ |
+| `model_used` | `cold_start_analog` 🟡 | `seasonal_naive` ✅ |
+| `data_window` | `null` 🟡 | `2026-07-22..2026-08-11` ✅ |
+| `analog_of` | `[5 mã]` 🟡 | **vắng mặt** ✅ |
+
+**Cách đọc 3 con số — mỗi phân vị dùng cho một quyết định khác nhau:**
+
+| | Nghĩa | Dùng để |
+|---|---|---|
+| **`p50`** | kịch bản giữa — 50% khả năng bán hơn, 50% bán kém hơn | **lập kế hoạch**, ước doanh thu |
+| **`p90`** | kịch bản cao — chỉ 10% khả năng bán vượt mức này | **nhập hàng** (chuẩn bị cho ngày đắt khách) |
+| **`p10`** | kịch bản thấp — 90% khả năng bán hơn mức này | **giữ dòng tiền** (mức sàn an toàn) |
+
+⭐ Nhập theo `p50` thì **cháy hàng một nửa số ngày**. Đó là lý do phải trả cả dải, không phải một con số.
 
 ⭐ **So sánh với bước [07]:** giờ `run_id` là `r_<UTC>` (không còn `analog_`), `model_used` là mô hình
 thật, `data_window` **có giá trị** thay vì `null`. *"Cùng một API, nhưng giờ nó đứng trên dữ liệu của chính
@@ -1115,11 +2185,69 @@ của hai tệp kia).
 > ra `sc_64189737d95f · sc_755e061a0bdd · sc_d4fff226eba0` của mẻ 16:32-16:45, **không có** mẻ vừa tạo).
 > Phải dùng **`ls -lat`** (sắp theo thời gian) + `head`.
 
-### ④ LUỒNG
+#### 📥 INPUT
+
+| Trường | Bắt buộc | Ý nghĩa |
+|---|:---:|---|
+| `product_ids` | **✔** | mảng SKU cần dựng kịch bản |
+| `horizon_days` | | dựng cho bao nhiêu ngày tới |
+| `scenario_count` | | ⭐ **quay bao nhiêu "thế giới có thể xảy ra"** (demo: `128`) |
+
+#### 📤 RESPONSE — `run_id` + khối `manifest` **tự mô tả cách nó được sinh ra**
+
+| Trường | Ý nghĩa |
+|---|---|
+| `run_id` | `sc_…` — mã bộ kịch bản, 3 API sau ở DEMO-2 dùng mã này |
+| `manifest.scenario_count` · `horizon_days` | quay bao nhiêu lần, cho mấy ngày |
+| **`manifest.rng_algorithm`** · `rng_version` | ⭐ `philox` — **bộ sinh ngẫu nhiên CÓ HẠT GIỐNG, tái lập được** |
+| `manifest.scenario_index_contract` | phiên bản cách đánh số kịch bản |
+| **`manifest.files`** | ⭐⭐ **mã băm SHA-256 của TỪNG tệp** — bằng chứng chống sửa lén |
+| `manifest.marginals[sku].marginal_source` | `history_empirical` = phân phối lấy từ **lịch sử thật**, không phải giả định hình chuông |
+| `manifest.marginals[sku].demand_class` | ⭐ `smooth` (bán đều) \| `intermittent` (bán lai rai) — **hệ tự phân loại** |
+| `manifest.marginals[sku].tail` | xử lý đuôi phân phối |
+
+### ④ LUỒNG — **API tạo ra HIỆN VẬT (tệp), không chỉ trả JSON**
+
 ```
-:build ──► fit phân phối từ demand_daily ──► ghi 2 tệp .npz + manifest.json (SHA-256 từng tệp)
-       ──► ghi scenario_manifest (Postgres) ──► 3 API kịch bản sau dùng run_id này
+POST :scenarios:build
+   │
+   ├─① đọc demand_daily → khớp phân phối cho từng SKU
+   │     ⭐ TỰ PHÂN LOẠI trước: smooth hay intermittent
+   │        → mỗi loại dùng một họ phân phối KHÁC NHAU
+   │
+   ├─② quay 128 kịch bản bằng RNG philox CÓ HẠT GIỐNG
+   │     mỗi kịch bản = một chuỗi 7 ngày "có thể xảy ra"
+   │
+   ├─③ ✍ GHI 3 TỆP vào ĐĨA TRONG CONTAINER
+   │     /srv/data/artifacts/scenario/demoshop/<run_id>/
+   │        marginals.npz   (phân phối biên từng SKU)
+   │        factors.npz     (yếu tố chung — để các SKU tương quan với nhau)
+   │        manifest.json   (chứa SHA-256 của HAI tệp trên)
+   │     ⚠ nằm TRONG container, KHÔNG ở data/ trên máy host
+   │
+   ├─④ ✍ GHI 1 dòng scenario_manifest (Postgres) — trỏ tới thư mục trên
+   │
+   └─► trả run_id + manifest
+              │
+              └──► DEMO-2: scenarios:lead-time-demand · :aggregate · :probability
 ```
+
+⭐⭐ **Vì sao phải quay 128 lần thay vì cộng `p90` lại?** `[13]` cho `p90` của **từng ngày riêng lẻ**:
+`7.5 · 7.7 · 11.7`. Muốn biết 3 ngày cần trữ bao nhiêu, cộng lại `= 26.9`? **SAI, và sai theo hướng nguy
+hiểm** — để tổng chạm 26.9 thì **cả ba ngày phải CÙNG LÚC rơi vào kịch bản cao**, chuyện đó hiếm hơn nhiều
+so với một ngày cao. Cộng thô ra số **lớn hơn thực tế** ⇒ chủ shop **nhập dư, đọng vốn**.
+
+> ⭐ **Phân vị không cộng được.** Đây là lỗi kinh điển trong quản trị tồn kho. Cách chữa: quay 128 thế giới,
+> **mỗi thế giới cộng đủ 7 ngày CỦA CHÍNH NÓ**, rồi sắp 128 tổng đó lại và lấy phân vị. Giờ mới đúng.
+
+| Nơi lưu | Ghi gì | Loại |
+|---|---|---|
+| `demand_daily` | đọc | — |
+| đĩa container `/srv/data/artifacts/…` | ✍ **3 tệp** | 🗄 hiện vật |
+| `scenario_manifest` (Postgres) | ✍ 1 dòng | 📕 sổ chỉ mục trỏ tới hiện vật |
+
+⭐ **Hai bằng chứng kiểm toán được:** `rng_algorithm: philox` có hạt giống ⇒ **chạy lại ra đúng bộ kịch bản
+cũ**; `files` kèm SHA-256 ⇒ **ai sửa tệp là lộ ngay**.
 **Điểm khoe:** `rng_algorithm: philox` **có hạt giống, tái lập được** — chạy lại ra đúng bộ kịch bản cũ.
 `files` kèm **mã băm SHA-256** = bằng chứng chống sửa lén. `marginal_source: history_empirical` = phân phối
 lấy từ **lịch sử thật**, không phải giả định hình chuông.
@@ -1168,6 +2296,38 @@ curl -s -X POST localhost:16022/v1/decisions:run -H "Authorization: Bearer $DKEY
 ```
 > 🆕 Có thêm 2 trường `price_hold` / `anti_osc_hold` — số lời khuyên "giữ giá" và số ca bị khoá vì vừa đổi giá.
 
+#### 📥 INPUT — **thân RỖNG `{}`**, không tham số
+
+Lệnh nghĩa là *"quét **toàn bộ** shop, hôm nay có gì đáng khuyên không?"*. Phạm vi lấy từ `X-Project-Id`.
+Không chọn được từng SKU — vì bản chất nó là **mẻ quét định kỳ** (job nền cũng chạy đúng lệnh này mỗi
+**86.400 giây**), API chỉ là cách kích tay.
+
+#### 📤 RESPONSE — **không trả lời khuyên, mà trả BÁO CÁO CÔNG VIỆC**
+
+| Trường | Kiểu | Ý nghĩa |
+|---|---|---|
+| `created` | số | ⭐ số lời khuyên **MỚI** đã ghi vào `decisions` |
+| `skipped_dedup` | số | đã có lời khuyên **y hệt đang mở** ⇒ **không nhắc lại** |
+| `skipped_by_reason` | đối tượng | ⭐⭐ **vì sao KHÔNG khuyên** — bảng dưới |
+| `superseded_plan` | số | số lời khuyên **máy tự bác bỏ chính nó** ở tầng kế hoạch |
+| `price_hold` | số | số ca kết luận **"giữ nguyên giá"** (đây cũng là một lời khuyên) |
+| `anti_osc_hold` | số | số ca bị **khoá vì vừa đổi giá gần đây** |
+
+**`skipped_by_reason` — mỗi khoá là một lý do máy chọn IM LẶNG:**
+
+| Lý do | Nghĩa | Vì sao im lặng là đúng |
+|---|---|---|
+| `anti_oscillation` | SKU **vừa đổi giá** gần đây | đổi giá liên tục làm khách mất niềm tin + phá dữ liệu đo co giãn |
+| `plan_conflict` | SKU đã có hành động giá khác trong kế hoạch | **không phát 2 lệnh mâu thuẫn** cho cùng một mặt hàng |
+| `insufficient_history` | chưa đủ lịch sử | khuyên trên 3 ngày dữ liệu là đoán bừa |
+| `no_stock` | thiếu tồn kho | không biết còn bao nhiêu thì không khuyên nhập |
+| `no_cost` | thiếu giá vốn | không biết vốn thì **không được** khuyên giá — sẽ khuyên bán lỗ |
+
+⭐⭐ **Đọc bộ số này là đọc được TÍNH CÁCH của hệ.** Đo 13/08: **137 mặt hàng → chỉ 2 lời khuyên mới**, bỏ qua
+148 vì đã khuyên rồi, 141 vì vừa đổi giá, 84 vì trùng kế hoạch. *"Một hệ AI khuyên đổi giá mỗi ngày là hệ
+**làm hại** chủ shop — nhân viên sẽ tắt thông báo sau một tuần. **Biết khi nào nên im khó hơn biết khi nào
+nên nói.**"*
+
 ### ③ ĐO SAU
 ```bash
 q miniai_decision "SELECT kind, count(*) FROM decisions WHERE project_id='demoshop' AND created_at > now()-interval '5 min' GROUP BY 1;"
@@ -1175,18 +2335,66 @@ q miniai_decision "SELECT decision_id, kind, status FROM decisions WHERE project
 ```
 **Đo thật:** đúng bằng `created` ở trên, và thấy được lời khuyên nào thuộc SKU demo.
 
-### ④ LUỒNG + ý nghĩa từng con số
+### ④ LUỒNG — **API DUY NHẤT trong cả buổi thực sự RA QUYẾT ĐỊNH**
+
+Mọi bước trước đó chỉ **chuẩn bị dữ liệu**. Đây là nơi 6 nguồn hội tụ lại thành lời khuyên.
+
 ```
-:run ──► với MỖI SKU: đọc sales_daily + cost_state + stock_state + forecasts
-     ──► sinh ứng viên ──► DecisionPlan giải xung đột ──► guardrails ──► ghi decisions
+POST :decisions:run  ──►  LẶP QUA TỪNG SKU trong shop (137 SKU)
+   │
+   │   ┌── ① THU THẬP — 6 nguồn, đến từ 3 service khác nhau ──────────────┐
+   │   │   sales_daily   ← job state_rollup ← raw_events    (nhịp bán)     │
+   │   │   cost_state    ← job state_rollup ← cost.recorded (vốn)          │
+   │   │   price_state   ← job state_rollup ← price.changed (giá hiện tại) │
+   │   │   stock_state   ← job state_rollup ← stock.level   (tồn kho)      │
+   │   │   forecasts     ← job forecast_run ← demand_daily  (cầu tương lai)│
+   │   │   elasticity    ← ước lượng nền                    (độ co giãn)   │
+   │   └───────────────────────────────────────────────────────────────────┘
+   │                              │
+   │   ┌── ② SINH ỨNG VIÊN — 7 loại lời khuyên ───────────────────────────┐
+   │   │   price_suggestion · price_hold · replenishment_advice            │
+   │   │   bundle_suggestion · stockout_warning · below_cost_alert         │
+   │   │   promo_legal_alert                                               │
+   │   │   ⭐ price_hold cũng LÀ một lời khuyên: "giữ nguyên" là kết luận,  │
+   │   │      không phải "không có ý kiến"                                 │
+   │   └───────────────────────────────────────────────────────────────────┘
+   │                              │
+   │   ┌── ③ DecisionPlan — GIẢI XUNG ĐỘT trong cùng một SKU ─────────────┐
+   │   │   cùng SKU không được nhận 2 lệnh giá mâu thuẫn                   │
+   │   │   ⭐ máy có thể TỰ BÁC BỎ CHÍNH NÓ: sinh price_suggestion, xét lại │
+   │   │      rồi thay bằng price_hold  ⇒ superseded_plan++                │
+   │   │   lệnh bị bỏ VẪN LƯU, status='superseded', presentable=false      │
+   │   └───────────────────────────────────────────────────────────────────┘
+   │                              │
+   │   ┌── ④ GUARDRAILS — chốt CỨNG, không phải gợi ý mềm ────────────────┐
+   │   │   BELOW_COST        : giá đề xuất < vốn?        ⇒ chặn            │
+   │   │   trần giảm giá 50% : vượt ngưỡng pháp lý?      ⇒ chặn           │
+   │   │   anti-oscillation  : SKU vừa đổi giá?          ⇒ khoá           │
+   │   └───────────────────────────────────────────────────────────────────┘
+   │                              │
+   └─► ✍ GHI bảng decisions — MỖI DÒNG BẮT BUỘC KÈM `trace`
+                                  │
+                                  ├──► [16] giao diện đọc lên
+                                  └──► [20] chủ shop phán ──► feedback ──► outcome_ledger
 ```
-| Trường | Nghĩa |
-|---|---|
-| `created` | số lời khuyên **mới** |
-| `skipped_dedup` | đã có lời khuyên y hệt đang mở → **không spam lại** |
-| `anti_oscillation` | **chặn đổi giá liên tục** — SKU vừa đổi giá thì khoá |
-| `plan_conflict` | cùng SKU đã có hành động giá khác → tránh 2 lệnh mâu thuẫn |
-| `no_stock` / `no_cost` | thiếu tồn / thiếu vốn → **không khuyên bừa** |
+
+**Bảng đọc/ghi:**
+
+| Bảng | Đọc | Ghi |
+|---|:---:|:---:|
+| `sales_daily` · `cost_state` · `price_state` · `stock_state` · `forecasts` · `elasticity` | ✔ | ✗ |
+| **`decisions`** | ✔ (để khử trùng) | ✍ **ghi mới + đánh dấu `superseded`** |
+
+⭐⭐ **Cột `trace` khai báo `NOT NULL` — hộp đen bị chặn Ở TẦNG DỮ LIỆU.** Nghĩa là **không thể tồn tại** một
+lời khuyên trong CSDL mà không kèm toàn bộ phép tính viết bằng chữ. Không phải lời hứa của người bán phần
+mềm, mà là **ràng buộc của cơ sở dữ liệu** — muốn ghi lời khuyên thiếu giải thích thì Postgres từ chối.
+
+⭐ **`superseded` thay vì xoá.** Lệnh bị bác bỏ vẫn nằm nguyên trong bảng, chỉ `presentable=false` để ẩn khỏi
+giao diện. *"Sáu tháng sau kiểm toán hỏi 'sao hôm đó máy không khuyên đổi giá', ta mở đúng dòng đó ra đọc
+được cả lý do. **Xoá là mất dấu; ẩn là còn dấu.**"*
+
+⚠ **API này ĐỌC `forecasts`, nên phải chạy SAU `[11]`+`[12]`.** Chạy trước thì nó quyết định trên dự báo cũ —
+và **không có gì báo sai**.
 
 ---
 ## [16] GET /v1/decisions — danh sách lời khuyên
@@ -1218,13 +2426,71 @@ q miniai_decision "SELECT decision_id, kind, status, presentable FROM decisions 
 > Nay `product_id` là bí danh của `subject_id` và lọc thật; truyền cả hai mà khác giá trị thì báo lỗi 400
 > thay vì tự chọn hộ.
 
-### ④ Mỗi lời khuyên gồm
+#### 📥 INPUT — **`GET`, 8 tham số URL, TẤT CẢ tuỳ chọn** (`main.py:526-537`)
+
+| Tham số | Kiểu | Mặc định | Ý nghĩa |
+|---|---|---|---|
+| `product_id` | chuỗi | — | ⭐ **bí danh của `subject_id`** — lọc theo SKU |
+| `subject_id` | chuỗi | — | chủ đề lời khuyên (luôn là một sản phẩm) |
+| `kind` | chuỗi | — | lọc theo loại: `price_suggestion` · `price_hold` · `replenishment_advice` · … |
+| `status` | chuỗi | — | `open` · `accepted` · `dismissed` · `superseded` |
+| `page_size` | số nguyên **1–100** | `50` | ngoài khoảng ⇒ `400` |
+| `cursor` | chuỗi | — | phân trang — lấy từ `next_cursor` của lần gọi trước |
+| `include_blocked` | luận lý | `false` | có lấy cả lời khuyên bị guardrail chặn không |
+| `experiment_id` | chuỗi | — | lọc theo thí nghiệm |
+
+⭐ **Truyền CẢ `product_id` VÀ `subject_id` với giá trị KHÁC nhau ⇒ `400`**, chứ hệ **không tự chọn hộ**.
+Đây là lựa chọn có chủ ý: mơ hồ thì hỏi lại, không đoán ý người gọi.
+
+> 🆕 **Đã vá 12/08 — trước đây `?product_id=` bị BỎ QUA IM LẶNG.** FastAPI lờ mọi query param không khai báo,
+> nên API trả **nguyên danh sách cả shop** trong khi người gọi tưởng đã lọc. **Bỏ qua im lặng tệ hơn báo lỗi:**
+> người dùng không có cách nào biết mình đang nhìn số sai.
+> ⚠ Lưu ý: `openapi/decision.json` (sinh 12/08 22:18) **vẫn chưa có** `product_id` — hợp đồng máy đang **cũ
+> hơn mã**. Đọc mã là đúng, đọc openapi ở chỗ này là thiếu.
+
+#### 📤 RESPONSE
+
+| Trường | Ý nghĩa |
+|---|---|
+| `items[]` | danh sách lời khuyên — 12 trường mỗi dòng, bảng dưới |
+| `next_cursor` | mã trang tiếp; `null` = hết |
+| `consistency` | tình trạng bắt kịp sổ cái |
+
+**Mỗi lời khuyên (`items[]`) — 12 trường:**
+
 | Trường | Nghĩa |
 |---|---|
-| `expected_value` | **lợi ích kỳ vọng bằng tiền/tháng** — cơ sở xếp ưu tiên |
+| `decision_id` | mã lời khuyên — dùng cho `[20]` phản hồi |
+| `kind` | loại (1 trong 7) |
+| `subject` | chủ đề — sản phẩm nào |
+| `action` · `action_params` | **hành động đề xuất** và tham số kèm (vd giá mới) |
+| `expected_value` | ⭐ **lợi ích kỳ vọng bằng TIỀN/tháng** — cơ sở xếp ưu tiên |
 | `confidence` | độ tin theo chất lượng bằng chứng |
 | `guardrails` | các chốt an toàn đã kiểm và kết quả |
-| `trace` | **toàn bộ phép tính viết ra bằng chữ** — tự kiểm được, không phải hộp đen |
+| **`trace`** | ⭐⭐ **toàn bộ phép tính viết ra bằng chữ** — `NOT NULL` trong CSDL |
+| `status` | `open` · `accepted` · `dismissed` · `superseded` |
+| **`presentable`** | ⭐ có hiện lên giao diện không — `false` = **ẩn nhưng KHÔNG XOÁ** |
+| `created_at` | thời điểm sinh |
+
+### ④ LUỒNG — **tầng ĐỌC THUẦN, nhưng là nơi lộ ra kỷ luật của hệ**
+
+```
+[15] decisions:run ──ghi──► bảng decisions ──đọc──► [16] GET /v1/decisions ──► giao diện chủ shop
+                                   │                        (KHÔNG ghi gì)
+                                   └──► [20] feedback đổi status
+```
+
+| Bảng | Đọc | Ghi |
+|---|:---:|:---:|
+| `decisions` | ✔ | ✗ |
+
+⭐⭐ **Hai cột đáng dừng lại — chúng là bằng chứng hệ không phải hộp đen:**
+
+**`trace`** — khai báo `NOT NULL`. Không thể ghi lời khuyên mà không giải thích được nó tính từ đâu. Chống
+hộp đen bằng **ràng buộc CSDL**, không bằng lời hứa.
+
+**`presentable`** — lời khuyên bị thay thế có `status=superseded, presentable=false`. **Ẩn khỏi giao diện
+nhưng vẫn nằm trong bảng.** *"Xoá là mất dấu; ẩn là còn dấu."*
 
 ---
 ## [17] POST /v1/decisions:price-preview — **GIỜ TRẢ LỜI ĐƯỢC** (trước đó 412)
@@ -1288,10 +2554,40 @@ q miniai_decision "SELECT eps, n_points, r2, method FROM elasticity WHERE projec
 chỉ có **19 điểm**. `r2` **trống** = chưa có độ khớp riêng. `confidence 0.7` (không phải 0.9) — **tự hạ điểm
 tin cậy vì bằng chứng yếu hơn**. Đo 13/08: API và bảng khớp tới **từng chữ số float**.
 
-### ④ Đọc kết quả cho khách
-Giảm 145.000 → 129.000 thì **bán thêm** (89 → 93,96 thùng/tháng)… nhưng
+### ④ LUỒNG — **cùng API `[08]`, nhưng giờ qua được CẢ 3 CỔNG**
+
+📥 INPUT: y hệt `[08]` (`product_id` + `candidate_price`). 📤 RESPONSE: **hình dạng ②** — xem bảng đầy đủ ở `[08]`.
+
+```
+POST :price-preview (129000)
+   │
+   ├─🚪 CỔNG 1 sales_daily 30d  → 21 dòng   ✅ (màn 2 là 0)   ← nhờ [09] + rollup
+   ├─🚪 CỔNG 2 cost_state       → 98.000    ✅ (màn 2 trống)  ← nhờ [10] + state_rollup
+   ├─🚪 CỔNG 3 price_state      → 145.000   ✅ (màn 2 trống)  ← nhờ [10] + state_rollup
+   │
+   ├─ CHỌN ĐỘ CO GIÃN
+   │     price_history có đủ biến động giá? → ols_daily (hồi quy riêng SKU)
+   │     KHÔNG đủ (SKU mới, 19 điểm)        → pooled_prior ⭐ MƯỢN trung bình shop
+   │                                            + để TRỐNG r2 + HẠ confidence xuống 0.7
+   │
+   ├─ Q(P) = Q0 × (P/P0)^eps          89 × (129000/145000)^(−0.4641) = 93.96
+   ├─ profit = (P − vốn) × Q          hiện tại: (145−98)k × 89   = 4.183.000
+   │                                  giá thử : (129−98)k × 93.96 = 2.912.847
+   ├─ delta_profit_30d = −1.270.152
+   ├─ guardrails: BELOW_COST → 129.000 > 98.000 ⇒ PASS
+   │
+   └─► 200 + bảng tính + explanation   ✗ KHÔNG GHI BẢNG NÀO (kể cả decisions)
+```
+
+**Đọc kết quả cho khách:** giảm 145.000 → 129.000 thì **bán thêm** (89 → 93,96 thùng/tháng)… nhưng
 `delta_profit_30d = **−1,27 triệu/tháng**` ⇒ **lãi GIẢM 30%**. *"Máy can bằng con số, chặn trực giác 'giảm
 giá cho chạy hàng'."*
+
+⭐⭐ **Điểm khoe lớn nhất không phải con số, mà là `method: pooled_prior`.** Hệ **tự khai đang mượn** độ co
+giãn trung bình của shop, **tự để trống `r2`**, và **tự hạ `confidence` xuống 0.7**. Đối chiếu với DEMO-2:
+`bh-mi-haohao` cho ra **đúng cùng `eps −0.4641`** nhưng `method: ols_daily`, `n=132`, `r2=0.4172`.
+**Kết quả trùng khít — mà hệ vẫn không dám tự nhận là mình biết chắc.** Đó là *trung thực về nhận thức*:
+không vì đoán trúng mà tự nâng điểm tin cậy.
 
 ---
 ## [18] POST /v1/decisions:price-preview (giá dưới vốn) — guardrail phải chặn
@@ -1319,10 +2615,40 @@ curl -s localhost:16022/v1/decisions:price-preview -H "Authorization: Bearer $DK
 ```
 **OUTPUT thật:** `guardrails: [{'code': 'BELOW_COST', 'status': 'FAIL'}]` · lãi tháng **âm ~6,4 triệu**
 
-### ④ Nói với khách
-*"Giá thử 80.000 trong khi giá vốn 98.000 — anh chị vừa tự truy vấn con số vốn đó. Guardrail trả **FAIL**.
-Chốt an toàn này được sửa ngày 06/08 (trước đó cả hai nhánh đều báo PASS) — lỗi do chính buổi tập của chúng
-tôi tìm ra, và đã có test hồi quy khoá lại."*
+### ④ LUỒNG — **cùng đường đi `[17]`, rẽ ở ĐÚNG MỘT chốt**
+
+📥 INPUT / 📤 RESPONSE: y hệt `[08]`+`[17]`, chỉ đổi `candidate_price` từ `129000` → `80000`.
+
+```
+POST :price-preview (80000)
+   │
+   ├─🚪 3 cổng dữ liệu ......................... ✅ vẫn qua (dữ liệu không đổi)
+   ├─ Q(P) và profit ........................... vẫn tính bình thường
+   │
+   ├─🛑 guardrails: BELOW_COST
+   │        80.000  <  98.000 (ewma_cost)   ⇒  status = "FAIL"
+   │
+   └─► 200 + bảng tính, NHƯNG mang cờ FAIL
+        delta_profit_30d ÂM SÂU: lãi +4.183.000 → −2.111.000 đ/tháng
+```
+
+⭐⭐ **Chú ý: vẫn trả `200`, không phải `4xx`.** Đây là API **thử-nếu-thì** — nó có nhiệm vụ **trả lời câu hỏi
+"nếu tôi bán 80k thì sao?"**, và câu trả lời đúng là *"anh sẽ lỗ 2,1 triệu/tháng, và chốt an toàn báo FAIL"*.
+Từ chối tính sẽ **cướp mất thông tin** của người hỏi. Ranh giới rõ ràng:
+
+| Tầng | Vai trò | Ở bước này |
+|---|---|---|
+| `[08]` **412** | *"tôi KHÔNG ĐỦ dữ liệu để trả lời"* | không áp dụng |
+| `[18]` **200 + FAIL** | *"tôi trả lời được, và câu trả lời là: ĐỪNG"* | ✅ |
+| `[15]` `decisions:run` | nơi guardrail **thực sự CHẶN** không cho lời khuyên ra đời | — |
+
+⭐ **`guardrails` là mảng, không phải một cờ.** Mỗi chốt có `code` + `status` riêng, nên đọc được **chốt nào
+đã kiểm và chốt nào trượt** — không phải một chữ "không hợp lệ" trống rỗng.
+
+**Nói với khách:** *"Giá thử 80.000 trong khi giá vốn 98.000 — anh chị vừa tự truy vấn con số vốn đó.
+Guardrail trả **FAIL**, và máy không chỉ nói 'không nên' — nó nói **mất bao nhiêu tiền**: từ lãi 4,18 triệu
+sang lỗ 2,11 triệu mỗi tháng. Chốt an toàn này được sửa ngày 06/08 (trước đó cả hai nhánh đều báo PASS) —
+lỗi do chính buổi tập của chúng tôi tìm ra, và đã có test hồi quy khoá lại."*
 
 ---
 ## [19] GET /v1/decisions:replenish-plan — nhập bao nhiêu, khi nào
@@ -1404,7 +2730,74 @@ print(f'days_of_inv   = {on_hand/avg:.1f}   (so voi API)')"
 đúng con số đó**. Cách diễn đúng tinh thần: *"Tôi không dùng con số in sẵn trong tài liệu — tôi lấy **đúng
 sáu con số API vừa trả trên màn hình** và bấm lại. Ra y hệt."*
 
-### ④ Dịch sang lời chủ shop
+#### 📥 INPUT — **`GET`, 1 tham số, TUỲ CHỌN**
+
+| Tham số | Bắt buộc | Ý nghĩa |
+|---|:---:|---|
+| `product_id` | | có ⇒ chỉ 1 SKU · **không có ⇒ kế hoạch cho TOÀN BỘ shop** |
+
+#### 📤 RESPONSE — 4 trường bọc ngoài, **16 trường mỗi SKU**
+
+| Trường ngoài | Ý nghĩa |
+|---|---|
+| `items[]` | mỗi SKU một dòng |
+| `n` | số SKU trong kết quả |
+| `window_days` | ⭐ **cửa sổ tính nhịp bán — luôn là `30`** |
+| `generated_at` | thời điểm |
+
+**16 trường mỗi SKU — chia làm 4 nhóm:**
+
+| Nhóm | Trường | Ý nghĩa |
+|---|---|---|
+| 📊 **Đo được** | `avg_daily_units` | bán TB/ngày = tổng bán ÷ **trọn 30 ngày** |
+| | `sigma_daily` | độ dao động của nhịp bán |
+| | `on_hand` | tồn kho hiện tại (từ `stock_state`) |
+| 🚚 **Nhà cung cấp** | `lead_time_days` | hàng về mất mấy ngày |
+| | `lead_time_std` | dao động của thời gian giao |
+| 🎯 **Chính sách** | `service_level` | mức không-cháy-hàng mong muốn (`0.9` = 90%) |
+| | `z` | hệ số phân phối chuẩn ứng với mức trên (`0.9` → `1.28`) |
+| 🧮 **Kết quả** | `safety_stock` | **đệm an toàn** cho dao động |
+| | **`reorder_point`** | ⭐⭐ **còn bằng này thì ĐẶT HÀNG NGAY** |
+| | `days_of_inventory` | tồn hiện tại đủ bán mấy ngày |
+| | `below_reorder_point` | ⭐ **`true` = phải đặt hàng NGAY** |
+| | `moq` · `pack_size` · `order_qty_moq_pack` | lượng đặt tối thiểu · quy cách thùng · **số cần đặt đã làm tròn** |
+| | **`formula`** | ⭐⭐ **công thức viết ra bằng chữ, ngay trong kết quả** |
+
+⭐⭐ **`formula` là trường đắt nhất cả buổi.** API **tự in ra phép tính của chính nó**, để người đọc **bấm máy
+tính kiểm lại**. Không hệ nào dám in công thức ra nếu nó không tự tin con số của mình đúng.
+
+### ④ LUỒNG — **4 nguồn hội tụ, tất cả chỉ ĐỌC**
+
+```
+   sales_daily (30 ngày)  ─┐   ← job state_rollup (300s) ← raw_events
+       │ avg_daily, sigma  │
+   stock_state            ─┤   ← job state_rollup ← sự kiện stock.level
+       │ on_hand           │
+   supplier_config        ─┤   ← cấu hình nhà cung cấp (lead time)
+       │ LT, sigma_LT      │
+   chính sách service 90% ─┘
+                           │
+                           ▼
+        ROP = avg_daily × LT  +  z × √(LT×σd² + avg_d²×σLT²)
+               ↑ bán bình thường   ↑ đệm cho dao động CẢ HAI phía
+                           │
+                           ▼
+        so với on_hand ⇒ below_reorder_point ⇒ order_qty làm tròn theo moq/pack
+                           │
+                           └─► trả về  ✗ KHÔNG GHI BẢNG NÀO
+```
+
+⭐ **Vì sao đệm an toàn phải có căn bậc hai, không phải cộng thẳng?** Vì có **hai nguồn bất định độc lập**:
+bán nhanh/chậm bất thường (`σd`) **và** hàng về sớm/muộn (`σLT`). Hai rủi ro độc lập thì **phương sai cộng
+được, độ lệch chuẩn thì KHÔNG** — nên phải cộng bình phương rồi mới lấy căn. Cộng thẳng sẽ ra đệm **quá lớn**
+⇒ đọng vốn không cần thiết.
+
+| Bảng | Đọc | Ghi |
+|---|:---:|:---:|
+| `sales_daily` · `stock_state` · `supplier_config` | ✔ | ✗ |
+| bất kỳ bảng nào | | ✗ **tầng đọc thuần** |
+
+#### Dịch sang lời chủ shop
 - Bán TB **2,97 thùng/ngày**, dao động ±2,50 · hàng về mất **7 ngày** (±2)
 - Muốn **90% không cháy hàng** ⇒ trữ thêm **11,37 thùng dự phòng**
 - ⇒ **Đặt lại khi còn 32,14 thùng.** Đang có 40 ⇒ **chưa cần đặt**, đủ bán **13,5 ngày**
@@ -1455,12 +2848,69 @@ và `outcome_note = "demo doi tac"` — **ghi chú của chủ shop được lư
 > chỉ đọc `outcome_note`, nên API vẫn trả 200, dòng feedback vẫn vào bảng, **chỉ mất chữ**. Nay `note` là bí
 > danh hợp lệ; gửi cả hai tên với giá trị khác nhau thì báo 400 thay vì tự chọn hộ.
 
-### ④ LUỒNG — vòng khép kín
+#### 📥 INPUT — `decision_id` **trên ĐƯỜNG DẪN**, 2 trường trong thân (`main.py:691-720`)
+
+| Vị trí | Trường | Bắt buộc | Ý nghĩa |
+|---|---|:---:|---|
+| đường dẫn | `{decision_id}` | **✔** | mã lời khuyên — lấy từ `items[].decision_id` của `[16]` |
+| thân | `action` | **✔** | ⭐ **`accepted`** (làm theo) \| **`dismissed`** (bỏ qua) |
+| thân | `outcome_note` | | ghi chú của chủ shop |
+| thân | `note` | | ⭐ **bí danh hợp lệ** của `outcome_note` |
+
+> 🆕 **Đã vá 12/08 — `note` trước kia bị NUỐT IM LẶNG.** Handler chỉ đọc `outcome_note`, nên gửi `note` thì
+> API vẫn trả `200`, dòng `feedback` vẫn vào bảng — **chỉ mất chữ**. Nay `note` là bí danh; gửi cả hai tên
+> với giá trị khác nhau ⇒ `400` thay vì tự chọn hộ. **Cùng loại lỗi** với `?product_id=` ở `[16]` và
+> `limit=` ở `[06]`: **tham số bị lờ im lặng**.
+
+#### 📤 RESPONSE
+
+| Trường | Ý nghĩa |
+|---|---|
+| `decision_id` | soi lại mã vừa phản hồi |
+| `status` | ⭐ trạng thái **MỚI** của lời khuyên — `accepted` hoặc `dismissed` |
+
+### ④ LUỒNG — **vòng khép kín, và cột chịu trách nhiệm**
+
 ```
-decisions ──► chủ shop phán ──► feedback ──► accepted_rate (bước [26] DEMO-2)
-                                        └──► sau 30 ngày: outcome_ledger
-                                              so LÃI THỰC TẾ với expected_value đã hứa
+[15] máy khuyên ──► decisions (expected_value = LỜI HỨA bằng tiền/tháng)
+        │
+        ▼
+[16] chủ shop đọc trên giao diện
+        │
+        ▼
+[20] chủ shop phán  ──┬─ ✍ INSERT feedback (project_id, decision_id, action, outcome_note, ts)
+                      └─ ✍ UPDATE decisions SET status = 'accepted' | 'dismissed'
+                                   │
+        ┌──────────────────────────┼──────────────────────────────┐
+        ▼                          ▼                              ▼
+  accepted_rate            job outcome_ledger              đo chất lượng
+  "máy được nghe            nhịp 604.800 GIÂY               lời khuyên theo
+   theo bao nhiêu %"        (1 TUẦN)                        thời gian
+                                   │
+                                   ▼
+                      ┌──────────────────────────────────────────┐
+                      │  bảng outcome_ledger — sau ~30 NGÀY      │
+                      │     predicted_ev  ◄── máy ĐÃ HỨA         │
+                      │     realized_ev   ◄── thực tế ĐÃ XẢY RA  │
+                      │     ⭐ đặt CẠNH NHAU trong cùng một dòng │
+                      └──────────────────────────────────────────┘
 ```
+
+**Bảng đọc/ghi:**
+
+| Bảng | Đọc | Ghi | Nhịp |
+|---|:---:|:---:|---|
+| `feedback` | ✔ | ✍ **1 dòng mới** | ngay |
+| `decisions.status` | ✔ | ✍ **cập nhật tại chỗ** | ngay |
+| `outcome_ledger` | ✗ | ✍ job `outcome_ledger` | **mỗi 604.800 giây (1 tuần)**, chấm lời khuyên đủ ~30 ngày tuổi |
+
+⭐⭐ **Cặp cột `predicted_ev` ↔ `realized_ev` là câu chốt của cả kịch bản.** Không có bảng này thì mọi con số
+`expected_value` chỉ là **lời hứa đẹp không ai kiểm**. Có nó thì hệ **tự chấm điểm chính mình bằng tiền
+thật**, và điểm đó **ai cũng mở ra xem được**.
+
+⚠ **Trên `demoshop` bảng này còn 0 dòng hợp lệ** — đúng và bình thường: lời khuyên phải **đủ ~30 ngày tuổi**
+mới chấm được. Dòng đầu tiên dự kiến khoảng **09/2026** (nợ tracked: `T-OUTCOME-30D`). Đừng hứa với khách là
+mở ra xem được ngay hôm nay.
 **Câu chốt:** *"Đây là thứ phân biệt một hệ thống AI nghiêm túc với một cái máy đoán: **nó chịu trách nhiệm
 với lời khuyên của mình bằng số**."*
 
