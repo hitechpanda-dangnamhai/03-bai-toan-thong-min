@@ -1484,8 +1484,19 @@ q miniai_search  "DELETE FROM query_log     WHERE project_id='demoshop' AND quer
 q miniai_search  "DELETE FROM suggest_terms WHERE project_id='demoshop' AND term       LIKE '%omachi%';"
 # 🆕 SỔ CÁI CHUNG — bản 07/08 VÀ 12/08 đều bỏ sót; không xoá thì lần sau [09] ra `conflicted: 24` thay vì 0
 q miniai_ledger  "DELETE FROM event_ledger  WHERE project_id='demoshop' AND payload::text LIKE '%demo-mi-omachi%';"
+# 🆕 QUÉT MỒ CÔI — chạy được nhiều lần, dọn cả feedback sót từ các lượt TRƯỚC
+q miniai_decision "DELETE FROM feedback f WHERE f.project_id='demoshop' AND NOT EXISTS (SELECT 1 FROM decisions d WHERE d.decision_id=f.decision_id);"
 rm -f /tmp/ev.json /tmp/fq.json
 ```
+
+> ⛔⛔ **Đã vá 13/08 (lần 2) — câu dọn `feedback` ở trên CHỈ CHẠY ĐƯỢC ĐÚNG MỘT LẦN.**
+> Nó lọc bằng câu con `SELECT ... FROM decisions WHERE subject_id=...`. Nếu `decisions` **đã bị xoá ở lượt
+> trước**, câu con trả rỗng ⇒ `DELETE 0` ⇒ **feedback mồ côi kẹt lại vĩnh viễn**. Đo thật 13/08: chạy khối
+> dọn lần hai, mọi dòng ra `DELETE 0` trừ `event_ledger` (`DELETE 24`), và **15 dòng feedback mồ côi vẫn
+> nguyên**. Vì thế phải có thêm câu **quét mồ côi** — nó không phụ thuộc thứ tự, chạy bao nhiêu lần cũng được.
+>
+> Đây là bài học chung của kiến trúc **0 khoá ngoại**: lệnh dọn phải **tự-đứng-vững** (idempotent), không
+> được dựa vào một bảng khác còn sống.
 
 > ⛔ **Đã vá 13/08 — khối DỌN SÂN cũ THIẾU 2 bảng so với `reset1`.** Đo thật sau khi chạy đúng bản cũ:
 > ```
