@@ -1510,12 +1510,31 @@ rm -f /tmp/ev.json /tmp/fq.json
 > 💡 **Cách an toàn nhất: cứ gõ `reset1`** — hàm đó vốn đã dọn đủ cả 4 kho. Khối rời này chỉ để đọc hiểu.
 > 📘 Bản đồ quan hệ + thứ tự xoá bắt buộc: `icpp/db-docs/MINIAI-DB-SCHEMA.md` §9.6
 
-**Kiểm lại đã sạch chưa — phải ra 0 hết:**
+**Kiểm lại đã sạch chưa — 🆕 khối NGHIỆM THU 9 PHÉP ĐO, phải ra `0` hết:**
 ```bash
-snap demo-mi-omachi
-q miniai_search "SELECT 'query_log='||count(*) FROM query_log WHERE project_id='demoshop' AND query_norm LIKE '%omachi%';"
-q miniai_search "SELECT 'suggest_terms='||count(*) FROM suggest_terms WHERE project_id='demoshop' AND term LIKE '%omachi%';"
+P=demo-mi-omachi
+echo "══════ NGHIEM THU DON SAN ══════"
+printf "  products        = %s\n" "$(q miniai_search   "SELECT count(*) FROM products     WHERE project_id='demoshop' AND product_id='$P'")"
+printf "  demand_daily    = %s\n" "$(q miniai_forecast "SELECT count(*) FROM demand_daily WHERE project_id='demoshop' AND product_id='$P'")"
+printf "  forecasts       = %s\n" "$(q miniai_forecast "SELECT count(*) FROM forecasts    WHERE project_id='demoshop' AND product_id='$P'")"
+printf "  sales_daily     = %s\n" "$(q miniai_decision "SELECT count(*) FROM sales_daily  WHERE project_id='demoshop' AND product_id='$P'")"
+printf "  decisions       = %s\n" "$(q miniai_decision "SELECT count(*) FROM decisions    WHERE project_id='demoshop' AND subject_id='$P'")"
+printf "  query_log       = %s\n" "$(q miniai_search   "SELECT count(*) FROM query_log    WHERE project_id='demoshop' AND query_norm LIKE '%omachi%'")"
+printf "  suggest_terms   = %s\n" "$(q miniai_search   "SELECT count(*) FROM suggest_terms WHERE project_id='demoshop' AND term LIKE '%omachi%'")"
+printf "  event_ledger    = %s\n" "$(q miniai_ledger   "SELECT count(*) FROM event_ledger WHERE project_id='demoshop' AND payload::text LIKE '%$P%'")"
+printf "  feedback mo coi = %s\n" "$(q miniai_decision "SELECT count(*) FROM feedback f WHERE f.project_id='demoshop' AND NOT EXISTS (SELECT 1 FROM decisions d WHERE d.decision_id=f.decision_id)")"
 ```
+
+> ⛔ **Đã vá 13/08 (lần 3) — khối kiểm cũ CHỈ ĐO 3 THỨ** (`snap` + `query_log` + `suggest_terms`), tức
+> **không đo được chính hai lỗi vừa vá ở trên**: `event_ledger` còn 24 dòng và `feedback` mồ côi 15 dòng
+> đều **lọt qua khối kiểm cũ mà vẫn báo sạch**.
+>
+> ⭐ **Bài học:** *phép kiểm phải phủ đúng những gì lệnh dọn động vào.* Dọn 9 bảng mà chỉ kiểm 3 thì
+> 6 bảng kia là **vùng mù** — và vùng mù là nơi lỗi tích luỹ âm thầm qua nhiều lượt (đúng như 15 dòng
+> mồ côi đã tích từ các buổi tập trước mà không ai biết).
+>
+> **Nghiệm thu thật 13/08 sau khi vá đủ: 9/9 = `0`** — lần đầu tiên sân sạch tuyệt đối, sạch hơn cả lúc
+> bắt đầu phiên.
 
 ---
 # BẢNG TỔNG KẾT MÀN DEMO (chiếu lên màn hình lúc chốt)
@@ -1550,6 +1569,8 @@ không phải tin lời tôi."*
 | ⛔ `[19]` ③ | 6 số **in cứng** trong khối tự-kiểm | **cảnh báo phải thay bằng số API** | Đo 13/08: người dẫn dán nguyên khối cũ → ra `12.08/32.84` khớp **tài liệu** nhưng lệch **API hôm đó** (`11.37/32.14`) ⇒ hoá ra chép đáp án, **mất sạch ý nghĩa bước này** |
 | ⛔ `[19]` ① | `avg(units)` | **`sum(units)/30.0`** | API chia trọn 30 ngày, câu cũ chia 21 ngày có dòng ⇒ `4.238` vs `2.967` — **mâu thuẫn ngay trước mặt khách** |
 | ⛔ DỌN SÂN | thiếu `feedback` + `event_ledger` | **đã bổ sung** | đo 13/08 sau khi chạy bản cũ: còn **24 dòng sổ cái** (⇒ lần sau `conflicted: 24`) và **15 dòng feedback mồ côi** |
+| ⛔ DỌN SÂN (lần 2) | câu dọn `feedback` **chỉ chạy được 1 lần** | **thêm câu quét mồ côi** idempotent | nó lọc qua câu con trên `decisions`; `decisions` đã xoá lượt trước ⇒ câu con rỗng ⇒ `DELETE 0` ⇒ **mồ côi kẹt vĩnh viễn**. Lệnh dọn phải **tự-đứng-vững** |
+| ⛔ Khối NGHIỆM THU | chỉ đo **3** thứ | **đo đủ 9** | dọn 9 bảng mà chỉ kiểm 3 ⇒ 6 bảng là **vùng mù**; chính 2 lỗi trên **lọt qua mà vẫn báo sạch**. Nghiệm thu thật sau khi vá: **9/9 = 0** |
 | `[17]` OUTPUT | `eps −0.5736 · n=21 · 95.17 · −1.232.627` | **`−0.4641 · n=19 · 93.96 · −1.270.152`** | số cũ của lần đo khác; thêm bảng % và đối chiếu `eps` với DEMO-2 |
 | `[19]` OUTPUT | `sigma 2.773 · ss 12.08 · ROP 32.84` | **`2.498 · 11.37 · 32.14`** | đo lại 13/08; thêm 3 trường `moq`/`pack_size`/`order_qty_moq_pack` bản cũ thiếu |
 | `[11]` ① và ③ | `job = 1` · `r_2026-08-13` | **`job = 4`** · **`r_<UTC>`** | số job lớn dần theo ngày; và cảnh báo gõ nhanh để bắt `queued` |
