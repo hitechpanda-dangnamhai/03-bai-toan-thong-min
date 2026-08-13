@@ -1276,8 +1276,14 @@ data_window= None
 |---|:---:|---|---|---|
 | `product_id` | **✔** | chuỗi, **độ dài ≥ 1** | — | SKU cần dự báo |
 | `horizon_days` | | số nguyên **1–56** | `14` | dự báo bao nhiêu ngày tới. ⚠ trần **56** — quá 8 tuần thì mô hình hết đáng tin |
-| `quantiles` | | mảng số thực 0–1 | — | xin thêm phân vị **ngoài** bộ p10/p50/p90 mặc định |
-| `granularity` | | `daily` | `daily` | độ mịn thời gian |
+| `quantiles` | | mảng **KHÔNG rỗng**, phần tử ∈ **{0.95, 0.99}** | — | xin thêm **phân vị ĐUÔI TRÊN** ngoài bộ p10/p50/p90. Số khác ⇒ `400` |
+| `granularity` | | `daily` \| `weekly` \| `monthly` | `daily` | khác `daily` ⇒ response **thêm `periods`**, mỗi kỳ gộp bằng **mô phỏng** (không cộng phân vị) |
+
+> ⛔ **Đã vá 13/08 — hai ô trên trước đây ghi HẸP HƠN mã nguồn.** Bản cũ ghi `quantiles` là *"mảng số thực
+> 0–1"* (thật ra **chỉ nhận `0.95` và `0.99`**, `main.py:658-670`) và `granularity` **chỉ có `daily`** (thật
+> ra có cả `weekly`/`monthly`, `main.py:671-677`). Ghi hẹp hơn mã là **giấu mất tính năng của khách**: họ
+> tưởng muốn xem theo tuần thì phải tự cộng — mà cộng phân vị là **sai về toán** (xem `[14]`), trong khi hệ
+> **đã** làm đúng hộ họ bằng mô phỏng (`main.py:832-857`). Phát hiện khi nâng khuôn DEMO-2 `[13]`.
 
 #### 📤 RESPONSE — 12 trường, trong đó **4 trường là LỜI TỰ KHAI**
 
